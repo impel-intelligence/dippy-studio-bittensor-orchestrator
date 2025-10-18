@@ -1,0 +1,14 @@
+python-dotenv
+fastapi
+uvicorn[standard]
+pydantic
+pysqlite3-binary==0.5.3
+bittensor==9.10.0
+substrate-interface
+py-sr25519-bindings
+rich
+numpy
+loguru
+google-cloud-storage>=2.16.0
+pyyaml
+httpx>=0.27.0

@@ -1,0 +1,4 @@
+dbs:
+  - path: "${LITESTREAM_DB_PATH}"
+    replicas:
+      - url: "gcs://${LITESTREAM_GCS_BUCKET}/${LITESTREAM_GCS_PATH}"

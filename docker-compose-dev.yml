@@ -1,0 +1,65 @@
+
+services:
+  orchestrator-dev:
+    build:
+      context: .
+      dockerfile: orchestrator/orchestrator.dev.Dockerfile
+    command: python orchestrator/server.py --live-reload --port 42069
+    ports:
+      - "42069:42069"
+    volumes:
+      - .:/app
+      - ${HOME}/.bittensor:/home/appuser/.bittensor:ro
+      - ./gcs_service_account.json:/app/gcs_service_account.json:ro
+      - orchestrator_state:/var/lib/orchestrator
+    environment:
+      - EPISTULA_HOTKEY_PATH=/home/appuser/.bittensor/wallets/coldkey/hotkeys/hotkey
+      - CALLBACK_GCS_BUCKET=${CALLBACK_GCS_BUCKET}
+      - CALLBACK_GCS_PREFIX=${CALLBACK_GCS_PREFIX:-callbacks}
+      - CALLBACK_GCS_CREDENTIALS=${CALLBACK_GCS_CREDENTIALS:-/app/gcs_service_account.json}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcs_service_account.json}
+      - JOBRELAY_BASE_URL=${JOBRELAY_BASE_URL:-http://jobrelay:8081}
+      - JOBRELAY_TIMEOUT_SECONDS=${JOBRELAY_TIMEOUT_SECONDS:-5}
+      - METAGRAPH_DB_PATH=/var/lib/orchestrator/orchestrator_state.db
+    env_file:
+      - .env
+    depends_on:
+      jobrelay:
+        condition: service_started
+
+  jobrelay:
+    build:
+      context: .
+      dockerfile: jobrelay/Dockerfile
+    ports:
+      - "8081:8081"
+    volumes:
+      - jobrelay_data:/var/lib/jobrelay
+      - ./gcs_service_account.json:/app/gcs_service_account.json:ro
+    environment:
+      - JOBRELAY_AUTH_TOKEN=${JOBRELAY_AUTH_TOKEN:-my-secret-key-here}
+      - JOBRELAY_GCS_BUCKET=${JOBRELAY_GCS_BUCKET:-subnet11_internal}
+      - JOBRELAY_GCP_CREDENTIALS_PATH=${JOBRELAY_GCP_CREDENTIALS_PATH:-/app/gcs_service_account.json}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcs_service_account.json}
+    env_file:
+      - .env
+
+  litestream:
+    image: litestream/litestream:0.3.12
+    depends_on:
+      - orchestrator-dev
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/gcs_service_account.json
+      - LITESTREAM_DB_PATH=/var/lib/orchestrator/orchestrator_state.db
+      - LITESTREAM_GCS_BUCKET=${LITESTREAM_GCS_BUCKET:-subnet11_internal}
+      - LITESTREAM_GCS_PATH=${LITESTREAM_GCS_PATH:-sqlite}
+    command: ["replicate", "-config", "/etc/litestream.yml"]
+    volumes:
+      - orchestrator_state:/var/lib/orchestrator
+      - ./orchestrator/litestream.yml:/etc/litestream.yml:ro
+      - ./gcs_service_account.json:/app/gcs_service_account.json:ro
+    restart: unless-stopped
+
+volumes:
+  jobrelay_data:
+  orchestrator_state:

@@ -1,0 +1,22 @@
+database:
+  path: /var/lib/orchestrator/orchestrator_state.db
+
+metagraph:
+  db_path: null
+
+audit_sample_size: 0.1
+metagraph_runner_interval: 300
+
+callback:
+  uploader: noop
+  url: https://orchestrator.dippy-bittensor-subnet.com/results/callback
+  gcs:
+    bucket: null
+    prefix: callbacks
+    credentials_path: null
+
+jobrelay:
+  enabled: true
+  base_url: http://jobrelay:8081
+  auth_token: secret-key-goes-here
+  timeout_seconds: 5.0
