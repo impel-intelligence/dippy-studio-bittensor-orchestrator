@@ -9,7 +9,7 @@ import uvicorn
 
 def main() -> None:
     host = os.getenv("JOBRELAY_HOST", "0.0.0.0")
-    port = int(os.getenv("JOBRELAY_PORT", "8081"))
+    port = int(os.getenv("JOBRELAY_PORT", "8181"))
     reload = os.getenv("JOBRELAY_RELOAD", "false").lower() in {"1", "true", "yes"}
     uvicorn.run("jobrelay.app:app", host=host, port=port, reload=reload, factory=False)
 

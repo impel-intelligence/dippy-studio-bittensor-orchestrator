@@ -14,20 +14,21 @@ from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.services.job_service import JobService
 
 
-
-class ListenService:
+class ListenEngine:
+    """Coordinate miner selection, job creation, and dispatch."""
 
     def __init__(
         self,
         job_service: JobService,
         metagraph: LiveMinerMetagraphClient,
-        callback_url: Optional[str] = None,
-        keypair: Any | None = None,
+        *,
+        epistula_client: EpistulaClient,
+        default_callback_url: str | None = None,
     ) -> None:
-        self.job_service = job_service
-        self.metagraph = metagraph
-        self.epistula_client = EpistulaClient(keypair)
-        self.default_callback_url = callback_url.strip() if isinstance(callback_url, str) else None
+        self._job_service = job_service
+        self._metagraph = metagraph
+        self._epistula_client = epistula_client
+        self._default_callback_url = default_callback_url.strip() if default_callback_url else None
 
     async def process(
         self,
@@ -37,25 +38,60 @@ class ListenService:
         desired_job_id: Optional[uuid.UUID],
         slog: StructuredLogger,
     ) -> uuid.UUID:
-        miner = self.metagraph.fetch_candidate()
+        miner = self._select_miner(job_type, slog)
+        job = await self._create_job(
+            job_type=job_type,
+            payload=payload,
+            miner=miner,
+            desired_job_id=desired_job_id,
+            slog=slog,
+        )
+
+        try:
+            dispatch_payload = self._build_dispatch_payload(job)
+            inference_url = self._resolve_inference_url(miner)
+        except Exception as exc:  # noqa: BLE001 - validation guard
+            await self._fail_job(
+                job.job_id,
+                f"prepare_failed:{type(exc).__name__}",
+                slog,
+                event="listen.prepare_failed",
+                error=str(exc),
+            )
+            return job.job_id
+
+        await self._job_service.mark_job_prepared(job.job_id)
+        await self._dispatch(job, miner, inference_url, dispatch_payload, slog)
+        return job.job_id
+
+    def _select_miner(self, job_type: JobType, slog: StructuredLogger) -> Miner:
+        miner = self._metagraph.fetch_candidate()
         if miner is None:
-            slog.warning(
+            slog.error(
                 "listen.no_candidate",
                 job_type=str(job_type),
-                reason="no_valid_miners",
             )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="No valid candidate miner available",
+                detail="No candidate miner available",
             )
+        return miner
 
-        job = await self.job_service.create_job(
+    async def _create_job(
+        self,
+        *,
+        job_type: JobType,
+        payload: Any,
+        miner: Miner,
+        desired_job_id: Optional[uuid.UUID],
+        slog: StructuredLogger,
+    ):
+        job = await self._job_service.create_job(
             job_type=job_type,
             payload=payload,
             hotkey=miner.hotkey,
             job_id=desired_job_id,
         )
-
         slog.info(
             "job.created",
             job_id=str(job.job_id),
@@ -66,64 +102,56 @@ class ListenService:
             miner_valid=getattr(miner, "valid", None),
             miner_alpha_stake=getattr(miner, "alpha_stake", None),
         )
+        return job
 
-        dispatch_payload: dict[str, Any]
-        inference_url: str
+    async def _dispatch(
+        self,
+        job: Any,
+        miner: Miner,
+        inference_url: str,
+        payload: dict[str, Any],
+        slog: StructuredLogger,
+    ) -> None:
         try:
-            dispatch_payload = self._build_dispatch_payload(job)
-            inference_url = self._resolve_inference_url(miner)
-        except Exception as exc:  # noqa: BLE001 - capture validation errors
-            reason = f"prepare_failed:{type(exc).__name__}"
-            await self.job_service.mark_job_failure(job.job_id, reason)
-            slog.error(
-                "listen.prepare_failed",
-                job_id=str(job.job_id),
-                error=str(exc),
-            )
-            return job.job_id
-
-        await self.job_service.mark_job_prepared(job.job_id)
-
-        try:
-            status_code, response_text = await self.epistula_client.post_signed_request(
+            status_code, response_text = await self._epistula_client.post_signed_request(
                 url=inference_url,
-                payload=dispatch_payload,
+                payload=payload,
                 miner_hotkey=miner.hotkey,
             )
         except urllib_error.URLError as exc:
-            reason = f"dispatch_error:{exc.reason or type(exc).__name__}"
-            await self.job_service.mark_job_failure(job.job_id, reason)
-            slog.error(
-                "listen.dispatch_error",
-                job_id=str(job.job_id),
+            await self._fail_job(
+                job.job_id,
+                f"dispatch_error:{exc.reason or type(exc).__name__}",
+                slog,
+                event="listen.dispatch_error",
                 url=inference_url,
                 error=str(exc),
             )
-            return job.job_id
+            return
         except Exception as exc:  # noqa: BLE001
-            reason = f"dispatch_error:{type(exc).__name__}"
-            await self.job_service.mark_job_failure(job.job_id, reason)
-            slog.error(
-                "listen.dispatch_error",
-                job_id=str(job.job_id),
+            await self._fail_job(
+                job.job_id,
+                f"dispatch_error:{type(exc).__name__}",
+                slog,
+                event="listen.dispatch_error",
                 url=inference_url,
                 error=str(exc),
             )
-            return job.job_id
+            return
 
         if status_code >= 400:
-            reason = f"dispatch_http_{status_code}"
-            await self.job_service.mark_job_failure(job.job_id, reason)
-            slog.error(
-                "listen.dispatch_failed",
-                job_id=str(job.job_id),
+            await self._fail_job(
+                job.job_id,
+                f"dispatch_http_{status_code}",
+                slog,
+                event="listen.dispatch_failed",
                 url=inference_url,
                 status_code=status_code,
                 response_preview=response_text[:200],
             )
-            return job.job_id
+            return
 
-        await self.job_service.mark_job_dispatched(job.job_id)
+        await self._job_service.mark_job_dispatched(job.job_id)
         slog.info(
             "listen.dispatch_success",
             job_id=str(job.job_id),
@@ -132,14 +160,27 @@ class ListenService:
             response_preview=response_text[:200],
         )
 
-        return job.job_id
+    async def _fail_job(
+        self,
+        job_id: uuid.UUID,
+        reason: str,
+        slog: StructuredLogger,
+        *,
+        event: str,
+        **log_fields: Any,
+    ) -> None:
+        await self._job_service.mark_job_failure(job_id, reason)
+        slog.error(
+            event,
+            job_id=str(job_id),
+            reason=reason,
+            **log_fields,
+        )
 
     def _resolve_inference_url(self, miner: Miner) -> str:
-        address = miner.network_address
-        address = address.strip()
+        address = (miner.network_address or "").strip()
         if address.endswith("/inference"):
             return address
-        
         base = address.rstrip("/")
         return f"{base}/inference"
 
@@ -165,11 +206,45 @@ class ListenService:
 
         callback_url = payload_copy.get("callback_url")
         if not isinstance(callback_url, str) or not callback_url.strip():
-            if self.default_callback_url:
-                callback_url = self.default_callback_url
+            if self._default_callback_url:
+                callback_url = self._default_callback_url
                 payload_copy["callback_url"] = callback_url
             else:
                 raise ValueError("Job payload missing callback_url")
 
         payload_copy["callback_url"] = callback_url
         return payload_copy
+
+
+class ListenService:
+    """Backward-compatible facade over ListenEngine."""
+
+    def __init__(
+        self,
+        job_service: JobService,
+        metagraph: LiveMinerMetagraphClient,
+        callback_url: Optional[str] = None,
+        keypair: Any | None = None,
+    ) -> None:
+        epistula_client = EpistulaClient(keypair)
+        self._engine = ListenEngine(
+            job_service=job_service,
+            metagraph=metagraph,
+            epistula_client=epistula_client,
+            default_callback_url=callback_url,
+        )
+
+    async def process(
+        self,
+        *,
+        job_type: JobType,
+        payload: Any,
+        desired_job_id: Optional[uuid.UUID],
+        slog: StructuredLogger,
+    ) -> uuid.UUID:
+        return await self._engine.process(
+            job_type=job_type,
+            payload=payload,
+            desired_job_id=desired_job_id,
+            slog=slog,
+        )

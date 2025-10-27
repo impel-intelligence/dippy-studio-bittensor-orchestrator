@@ -1,0 +1,95 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/example/orchestrator
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext: {}
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 42169
+  annotations: {}
+  labels: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  tls: []
+
+env: []
+envFromSecrets: []
+envFromConfigMaps: []
+
+resources: {}
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: null
+
+cronJobs:
+  scoring:
+    enabled: true
+    schedule: "0 * * * *"
+    command:
+      - python
+      - -m
+      - orchestrator.runners.scoring
+    args: []
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 1
+    failedJobsHistoryLimit: 3
+    ttlSecondsAfterFinished: null
+    restartPolicy: Never
+    env: []
+    envFromSecrets: []
+    envFromConfigMaps: []
+    resources: {}
+    image:
+      repository: ""
+      tag: ""
+      pullPolicy: ""
+  metagraph:
+    enabled: true
+    schedule: "*/10 * * * *"
+    command:
+      - python
+      - -m
+      - orchestrator.runners.metagraph
+    args: []
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 1
+    failedJobsHistoryLimit: 3
+    ttlSecondsAfterFinished: null
+    restartPolicy: Never
+    env: []
+    envFromSecrets: []
+    envFromConfigMaps: []
+    resources: {}
+    image:
+      repository: ""
+      tag: ""
+      pullPolicy: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

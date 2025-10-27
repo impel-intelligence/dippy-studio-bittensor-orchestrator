@@ -16,6 +16,10 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
+dynamic = ["optional-dependencies"]
+dependencies = [
+    "pydantic>=2.12.3",
+]
 
 [project.urls]
 "Homepage" = "https://dippy.ai"
@@ -23,3 +27,6 @@ classifiers = [
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.setuptools.dynamic.optional-dependencies]
+orchestrator = {file = ["requirements.orchestrator.txt"]}

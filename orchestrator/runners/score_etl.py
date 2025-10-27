@@ -1,156 +1,98 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import math
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Iterable
 
-from orchestrator.clients.jobrelay_client import BaseJobRelayClient
-from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient
 from orchestrator.common.structured_logging import StructuredLogger
-from orchestrator.services.job_scoring import job_to_score
-from orchestrator.services.score_service import ScoreRecord, ScoreService
+from orchestrator.services.score_service import ScoreRunSummary, ScoreService
 
 
 class ScoreETLRunner:
-    """Periodically recompute miner scores from recent inference jobs."""
-
-    _COMPLETED_STATUSES = {"success"}
-    _LOOKBACK_WINDOW = timedelta(days=7)
+    """Execute the score ETL pipeline once and report progress."""
 
     def __init__(
         self,
         *,
-        miner_metagraph_client: LiveMinerMetagraphClient,
-        job_relay_client: BaseJobRelayClient,
         score_service: ScoreService,
         netuid: int,
         network: str,
-        interval_seconds: float = 3600.0,
+        trace_hotkeys: Iterable[str] | None = None,
         logger: StructuredLogger | logging.Logger | None = None,
-        score_fn: Callable[[Mapping[str, Any]], float] = job_to_score,
     ) -> None:
-        self._miner_metagraph_client = miner_metagraph_client
-        self._job_relay_client = job_relay_client
         self._score_service = score_service
         self._netuid = netuid
         self._network = network
-        self._interval_seconds = max(interval_seconds, 0.0)
-        self._score_fn = score_fn
+        self._trace_hotkeys: list[str] = list(trace_hotkeys or [])
         self._logger: StructuredLogger | logging.Logger = (
             logger if logger is not None else logging.getLogger(__name__)
         )
-        self._task: Optional[asyncio.Task[None]] = None
-        self._stop_event: Optional[asyncio.Event] = None
-        self._trigger_event: Optional[asyncio.Event] = None
 
-    async def start(self) -> None:
-        if self._task is not None:
-            return
-
-        self._stop_event = asyncio.Event()
-        self._trigger_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        self._task = loop.create_task(self._run())
-
-    async def stop(self) -> None:
-        if self._task is None or self._stop_event is None:
-            return
-
-        self._stop_event.set()
-        if self._trigger_event is not None:
-            self._trigger_event.set()
-        try:
-            await self._task
-        finally:
-            self._task = None
-            self._stop_event = None
-            self._trigger_event = None
-
-    async def run_once(self) -> None:
-        await self._sync()
-
-    async def _run(self) -> None:
-        assert self._stop_event is not None
-        assert self._trigger_event is not None
-
-        while not self._stop_event.is_set():
-            await self._sync()
-            if self._interval_seconds == 0:
-                await asyncio.sleep(0)
-                continue
-            try:
-                await asyncio.wait_for(
-                    self._trigger_event.wait(),
-                    timeout=self._interval_seconds,
-                )
-            except asyncio.TimeoutError:
-                continue
-            finally:
-                if self._trigger_event.is_set():
-                    self._trigger_event.clear()
-
-    async def _sync(self) -> None:
-        
+    async def run_once(self) -> ScoreRunSummary | None:
         self._log(
             "info",
-            "score_etl.sync.disabled",
+            "score_etl.run.start",
             netuid=self._netuid,
             network=self._network,
+            trace_hotkeys=self._trace_hotkeys,
         )
-        return
 
-    def trigger(self) -> None:
-        """Request an immediate scoring pass without waiting for the interval."""
-        if self._trigger_event is None:
-            self._log("debug", "score_etl.trigger.skipped_not_running")
-            return
-
-        self._trigger_event.set()
-        self._log("debug", "score_etl.trigger.queued")
-
-    @classmethod
-    def _is_completed_inference_job(
-        cls, job: Mapping[str, Any], cutoff: datetime
-    ) -> bool:
-        job_type = str(job.get("job_type") or "").lower()
-        if job_type != "inference":
-            return False
-
-        if job.get("is_audit_job") is True:
-            return False
-
-        status = str(job.get("status") or "").lower()
-        if status not in cls._COMPLETED_STATUSES:
-            return False
-
-        completed_at = cls._parse_datetime(job.get("completed_at"))
-        if completed_at is None or completed_at < cutoff:
-            return False
-
-        return True
-
-    @staticmethod
-    def _parse_datetime(value: Any) -> Optional[datetime]:
-        if value is None:
+        try:
+            summary = await self._score_service.run_once(trace_hotkeys=self._trace_hotkeys)
+        except Exception as exc:  # pragma: no cover - logging safeguard
+            self._log(
+                "error",
+                "score_etl.run.failed",
+                netuid=self._netuid,
+                network=self._network,
+                error=str(exc),
+            )
             return None
 
-        if isinstance(value, datetime):
-            if value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc)
+        if summary is None:
+            self._log(
+                "info",
+                "score_etl.run.skipped",
+                netuid=self._netuid,
+                network=self._network,
+            )
+            return None
 
-        if isinstance(value, str):
-            try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-            if parsed.tzinfo is None:
-                return parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc)
+        level = "info" if summary.success else "error"
+        self._log(
+            level,
+            "score_etl.run.complete",
+            netuid=self._netuid,
+            network=self._network,
+            success=summary.success,
+            hotkeys_considered=summary.hotkeys_considered,
+            hotkeys_updated=summary.hotkeys_updated,
+            zeroed_hotkeys=summary.zeroed_hotkeys,
+            jobs_considered=summary.jobs_considered,
+            completed_at=summary.timestamp.isoformat(),
+        )
 
-        return None
+        if summary.trace_details and self._should_log_info():
+            self._log_trace_details(summary.trace_details)
+        return summary
+
+    def _should_log_info(self) -> bool:
+        logger = self._logger
+        if isinstance(logger, StructuredLogger):
+            return logger._logger.isEnabledFor(logging.INFO)  # type: ignore[attr-defined]
+        return logger.isEnabledFor(logging.INFO)
+
+    def _log_trace_details(self, details: dict[str, Any]) -> None:
+        for hotkey, payload in details.items():
+            self._log(
+                "info",
+                "score_etl.trace.hotkey",
+                hotkey=hotkey,
+                jobs_fetched=payload.get("jobs_fetched"),
+                job_statuses=payload.get("job_statuses"),
+                score=payload.get("score"),
+                slashed=payload.get("slashed"),
+                considered=payload.get("considered"),
+            )
 
     def _log(self, level: str, event: str, **fields: Any) -> None:
         logger = self._logger

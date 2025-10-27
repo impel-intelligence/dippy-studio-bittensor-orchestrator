@@ -2,33 +2,26 @@ from __future__ import annotations
 
 import argparse
 import os
-import uuid
 from pathlib import Path
-from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI
 
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient, JobRelayHttpClient, JobRelaySettings
-from orchestrator.config import OrchestratorConfig, load_config
-from orchestrator.dependencies import set_dependencies
 from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient
 from orchestrator.common.epistula_client import EpistulaClient
 from orchestrator.common.server_context import ServerContext
-from orchestrator.runners.metagraph import MetagraphStateRunner
-from orchestrator.runners.score_etl import ScoreETLRunner
+from orchestrator.config import OrchestratorConfig, load_config
+from orchestrator.dependencies import set_dependencies
+from orchestrator.routes import create_internal_router, create_public_router
 from orchestrator.services.callback_service import CallbackService
 from orchestrator.services.callback_uploader import BaseUploader, GCSUploader
 from orchestrator.services.database_service import DatabaseService
 from orchestrator.services.job_service import JobService
-from orchestrator.services.subnet_state_service import SubnetStateService
 from orchestrator.services.score_service import ScoreService
-from orchestrator.routes import create_internal_router, create_public_router
+from orchestrator.services.subnet_state_service import SubnetStateService
 
 __all__ = ["orchestrator"]
-
-
-METAGRAPH_RUN_INTERVAL_SECONDS = 300
 
 
 class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
@@ -39,7 +32,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
         config_path: str | Path | None = None,
         audit_sample_size: float | None = None,
         metagraph_runner_interval: float | None = None,
-        metagraph_db_path: Optional[str] = None,
+        database_url: str | None = None,
     ) -> None:  # noqa: D401 – simple init
         self.config = config or load_config(config_path)
 
@@ -47,32 +40,33 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             self.config.audit_sample_size = audit_sample_size
         if metagraph_runner_interval is not None:
             self.config.metagraph_runner_interval = metagraph_runner_interval
-        if metagraph_db_path is not None:
-            override_path = Path(metagraph_db_path)
-            self.config.database.path = override_path
-            self.config.metagraph.db_path = override_path
+        if database_url is not None:
+            self.config.database.url = database_url
 
         self.miner_registry = None
 
-        database_path = self.config.database.path
-        if database_path is not None:
-            database_path = Path(database_path)
-        else:
-            database_path = Path(
-                "/tmp", f"orchestrator_state-{os.getpid()}-{uuid.uuid4().hex}.db"
-            )
-        self.config.database.path = database_path
-        self.config.metagraph.db_path = database_path
-        self.database_service = DatabaseService(db_path=database_path)
+        resolved_db_url = self.config.database.url or os.getenv("DATABASE_URL")
+        if not resolved_db_url:
+            resolved_db_url = "postgresql://orchestrator:orchestrator@postgres:5432/orchestrator"
+
+        min_conn = max(1, self.config.database.min_connections)
+        max_conn = max(min_conn, self.config.database.max_connections)
+
+        self.config.database.url = resolved_db_url
+        self.database_service = DatabaseService(
+            dsn=resolved_db_url,
+            min_connections=min_conn,
+            max_connections=max_conn,
+        )
 
         self.epistula_client = EpistulaClient()
         self.miner_metagraph_client = LiveMinerMetagraphClient(
             database_service=self.database_service,
             epistula_client=self.epistula_client
         )
-        netuid = 11
-        network = "finney"
-        self.subnet_state_service = SubnetStateService(network=network)
+        self.netuid = self.config.subnet.netuid
+        self.network = self.config.subnet.network
+        self.subnet_state_service = SubnetStateService(network=self.network)
 
         self.server_context = ServerContext.default(service_name="orchestrator")
 
@@ -125,29 +119,14 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             database_service=self.database_service,
             job_service=self.job_service,
             subnet_state_service=self.subnet_state_service,
-            netuid=netuid,
-            network=network,
+            netuid=self.netuid,
+            network=self.network,
             miner_metagraph_client=self.miner_metagraph_client,
+            ema_alpha=self.config.scores.ema_alpha,
+            ema_half_life_seconds=self.config.scores.ema_half_life_seconds,
+            failure_penalty_weight=self.config.scores.failure_penalty_weight,
         )
         self.server_context.score_service = self.score_service
-
-        self.metagraph_runner = MetagraphStateRunner(
-            miner_metagraph_client=self.miner_metagraph_client,
-            netuid=netuid,
-            network=network,
-            interval_seconds=self.config.metagraph_runner_interval,
-            logger=self.server_context.logger,
-            subnet_fetcher=self.subnet_state_service.fetch_state,
-        )
-
-        self.score_runner = ScoreETLRunner(
-            miner_metagraph_client=self.miner_metagraph_client,
-            job_relay_client=self.job_relay_client,
-            score_service=self.score_service,
-            netuid=netuid,
-            network=network,
-            logger=self.server_context.logger,
-        )
 
         self.app = FastAPI(title="Orchestrator Service", version="0.0.1")
         self._setup_dependencies_and_routes()
@@ -188,32 +167,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
                 url=self.config.jobrelay.base_url,
             )
 
-        async def _start_metagraph_runner() -> None:
-            await self.metagraph_runner.run_once()
-            self.server_context.logger.info(
-                "metagraph.full_init.complete",
-            )
-            await self.metagraph_runner.start()
-
-        async def _start_score_runner() -> None:
-            await self.score_runner.run_once()
-            self.server_context.logger.info(
-                "score_etl.full_init.complete",
-            )
-            await self.score_runner.start()
-
-        async def _stop_metagraph_runner() -> None:
-            await self.metagraph_runner.stop()
-            self.database_service.close()
-
-        async def _stop_score_runner() -> None:
-            await self.score_runner.stop()
-
         self.app.add_event_handler("startup", _verify_jobrelay_connection)
-        self.app.add_event_handler("startup", _start_metagraph_runner)
-        self.app.add_event_handler("startup", _start_score_runner)
-        self.app.add_event_handler("shutdown", _stop_metagraph_runner)
-        self.app.add_event_handler("shutdown", _stop_score_runner)
 
 
 def create_app() -> FastAPI:
@@ -231,8 +185,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--port",
         type=int,
-        default=42069,
-        help="Port to bind the server (default: 42069)",
+        default=42169,
+        help="Port to bind the server (default: 42169)",
     )
     
     args = parser.parse_args()

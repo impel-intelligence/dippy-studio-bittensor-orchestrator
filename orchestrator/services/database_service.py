@@ -1,59 +1,75 @@
 from __future__ import annotations
 
-import os
-import uuid
-from pathlib import Path
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterator, Optional
 
-import pysqlite3 as sqlite3  # Use bundled modern SQLite with JSON1 support
+import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg_pool import ConnectionPool
 
 
 class DatabaseService:
+    """Lightweight wrapper around a psycopg connection pool."""
 
-    def __init__(self, db_path: Optional[str | Path] = None) -> None:
-        if db_path is None:
-            tmp_dir = Path("/tmp")
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            db_path = tmp_dir / f"orchestrator_state-{os.getpid()}-{uuid.uuid4().hex}.db"
-        else:
-            db_path = Path(db_path)
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        min_connections: int = 1,
+        max_connections: int = 10,
+        kwargs: Optional[dict[str, object]] = None,
+    ) -> None:
+        if not dsn:
+            raise ValueError("DatabaseService requires a PostgreSQL DSN")
 
-        self._db_path = Path(db_path)
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection: Optional[sqlite3.Connection] = self._create_connection()
+        pool_kwargs = {"autocommit": True}
+        if kwargs:
+            pool_kwargs.update(kwargs)
+
+        self._dsn = dsn
+        self._pool = ConnectionPool(
+            conninfo=self._dsn,
+            min_size=max(1, min_connections),
+            max_size=max(1, max_connections),
+            kwargs=pool_kwargs,
+            open=True,
+        )
 
     @property
-    def path(self) -> Path:
-        return self._db_path
+    def dsn(self) -> str:
+        return self._dsn
 
-    def get_connection(self) -> sqlite3.Connection:
-        if self._connection is None:
-            self._connection = self._create_connection()
-        return self._connection
+    @property
+    def safe_dsn(self) -> str:
+        try:
+            params = conninfo_to_dict(self._dsn)
+        except Exception:
+            return self._dsn
 
-    def create_connection(self) -> sqlite3.Connection:
-        return self._create_connection()
+        if "password" in params and params["password"] is not None:
+            params["password"] = "***"
+
+        try:
+            return make_conninfo(**params)
+        except Exception:
+            filtered = [f"{key}={value}" for key, value in params.items() if value is not None]
+            return " ".join(filtered) if filtered else self._dsn
+
+    @contextmanager
+    def connection(self) -> Iterator[psycopg.Connection]:
+        with self._pool.connection() as conn:
+            yield conn
+
+    @contextmanager
+    def cursor(self) -> Iterator[psycopg.Cursor]:
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                yield cur
 
     def close(self) -> None:
-        if self._connection is None:
-            return
         try:
-            self._connection.close()
+            self._pool.close()
+            self._pool.wait()
         except Exception:
-            pass
-        finally:
-            self._connection = None
-
-    def _create_connection(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self._db_path))
-        self._configure_connection(connection)
-        return connection
-
-    @staticmethod
-    def _configure_connection(connection: sqlite3.Connection) -> None:
-        try:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA synchronous=NORMAL")
-            connection.execute("PRAGMA busy_timeout=5000")
-        except Exception:
+            # Allow double close in teardown paths without raising.
             pass

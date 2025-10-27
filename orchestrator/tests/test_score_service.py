@@ -71,9 +71,9 @@ async def test_build_scores_from_state_aggregates_recent_inference_jobs() -> Non
 
     assert hotkey in response.scores
     payload = response.scores[hotkey]
-    # Only the recent successful job within the lookback window should contribute.
-    assert payload.score.total_score == pytest.approx(1.0 - (1000 / 60000.0))
-    assert response.stats["jobs_considered"] == 1
+    # Recent success contributes, while the accompanying failure applies the penalty weight.
+    assert payload.score.total_score == pytest.approx(0.8, rel=1e-3)
+    assert response.stats["jobs_considered"] == 2
     assert response.stats["jobs_scored"] == 1
     assert response.stats["fetch_failures"] == 0
 

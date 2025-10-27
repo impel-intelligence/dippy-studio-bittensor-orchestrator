@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Optional
 
 from fastapi import Depends
@@ -19,16 +20,28 @@ from orchestrator.services.subnet_state_service import SubnetStateService
 from orchestrator.services.score_service import ScoreService
 
 
-_miner_metagraph_client: Optional[LiveMinerMetagraphClient] = None
-_database_service: Optional[DatabaseService] = None
-_server_context: Optional[ServerContext] = None
-_callback_service: Optional[CallbackService] = None
-_job_relay_client: Optional[BaseJobRelayClient] = None
-_config: Optional[OrchestratorConfig] = None
-_subnet_state_service: Optional[SubnetStateService] = None
-_score_service: Optional[ScoreService] = None
-_epistula_client: Optional[EpistulaClient] = None
-_job_service: Optional[JobService] = None
+@dataclass
+class DependencyRegistry:
+    miner_metagraph_client: Optional[LiveMinerMetagraphClient] = None
+    database_service: Optional[DatabaseService] = None
+    server_context: Optional[ServerContext] = None
+    callback_service: Optional[CallbackService] = None
+    job_relay_client: Optional[BaseJobRelayClient] = None
+    config: Optional[OrchestratorConfig] = None
+    subnet_state_service: Optional[SubnetStateService] = None
+    score_service: Optional[ScoreService] = None
+    epistula_client: Optional[EpistulaClient] = None
+    job_service: Optional[JobService] = None
+
+
+_registry = DependencyRegistry()
+
+
+def _require(attribute: str, message: str) -> object:
+    value = getattr(_registry, attribute)
+    if value is None:
+        raise RuntimeError(message)
+    return value
 
 
 def set_dependencies(
@@ -45,37 +58,37 @@ def set_dependencies(
     epistula_client: Optional[EpistulaClient] = None,
 ) -> None:
     """Set the global dependencies that will be injected into services."""
-    global _miner_metagraph_client, _database_service, _server_context, _callback_service
-    global _job_relay_client, _config, _subnet_state_service, _score_service, _job_service
-    global _epistula_client
-    _miner_metagraph_client = miner_metagraph_client
-    _database_service = database_service
-    _server_context = server_context
-    _callback_service = callback_service
-    _job_relay_client = job_relay_client
-    _config = config
-    _subnet_state_service = subnet_state_service
-    _score_service = score_service
-    _job_service = job_service
-    _epistula_client = epistula_client
+    if miner_metagraph_client is not None:
+        _registry.miner_metagraph_client = miner_metagraph_client
+    if database_service is not None:
+        _registry.database_service = database_service
+    if server_context is not None:
+        _registry.server_context = server_context
+    if callback_service is not None:
+        _registry.callback_service = callback_service
+    _registry.job_relay_client = job_relay_client
+    if config is not None:
+        _registry.config = config
+    if subnet_state_service is not None:
+        _registry.subnet_state_service = subnet_state_service
+    if score_service is not None:
+        _registry.score_service = score_service
+    if job_service is not None:
+        _registry.job_service = job_service
+    if epistula_client is not None:
+        _registry.epistula_client = epistula_client
 
 
 def get_miner_metagraph_client() -> LiveMinerMetagraphClient:
-    if _miner_metagraph_client is None:
-        raise RuntimeError("MinerMetagraphClient not initialized")
-    return _miner_metagraph_client
+    return _require("miner_metagraph_client", "MinerMetagraphClient not initialized")  # type: ignore[return-value]
 
 
 def get_database_service() -> DatabaseService:
-    if _database_service is None:
-        raise RuntimeError("DatabaseService not initialized")
-    return _database_service
+    return _require("database_service", "DatabaseService not initialized")  # type: ignore[return-value]
 
 
 def get_server_context() -> ServerContext:
-    if _server_context is None:
-        raise RuntimeError("ServerContext not initialized")
-    return _server_context
+    return _require("server_context", "ServerContext not initialized")  # type: ignore[return-value]
 
 
 def get_structured_logger(
@@ -85,46 +98,36 @@ def get_structured_logger(
 
 
 def get_config() -> OrchestratorConfig:
-    if _config is None:
-        raise RuntimeError("OrchestratorConfig not initialized")
-    return _config
+    return _require("config", "OrchestratorConfig not initialized")  # type: ignore[return-value]
 
 
 def get_epistula_client() -> EpistulaClient:
-    if _epistula_client is None:
-        raise RuntimeError("EpistulaClient not initialized")
-    return _epistula_client
+    return _require("epistula_client", "EpistulaClient not initialized")  # type: ignore[return-value]
 
 
 def get_subnet_state_service() -> SubnetStateService:
-    if _subnet_state_service is None:
-        raise RuntimeError("SubnetStateService not initialized")
-    return _subnet_state_service
+    return _require("subnet_state_service", "SubnetStateService not initialized")  # type: ignore[return-value]
 
 
 def get_score_service() -> ScoreService:
-    if _score_service is None:
-        raise RuntimeError("ScoreService not initialized")
-    return _score_service
+    return _require("score_service", "ScoreService not initialized")  # type: ignore[return-value]
 
 
 def get_callback_service() -> CallbackService:
-    if _callback_service is not None:
-        return _callback_service
+    if _registry.callback_service is not None:
+        return _registry.callback_service
     return CallbackService()
 
 
 def get_job_relay_client() -> BaseJobRelayClient:
-    if _job_relay_client is None:
-        raise RuntimeError("Job relay client not initialized")
-    return _job_relay_client
+    return _require("job_relay_client", "Job relay client not initialized")  # type: ignore[return-value]
 
 
 def get_job_service(
     job_relay_client: BaseJobRelayClient = Depends(get_job_relay_client),
 ) -> JobService:
-    if _job_service is not None:
-        return _job_service
+    if _registry.job_service is not None:
+        return _registry.job_service
     return JobService(job_relay=job_relay_client)
 
 

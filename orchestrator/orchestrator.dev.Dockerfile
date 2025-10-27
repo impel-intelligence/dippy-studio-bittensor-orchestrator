@@ -53,12 +53,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 RUN useradd --create-home --shell /bin/bash appuser && \
     chown -R appuser:appuser /app && \
-    mkdir -p /var/lib/orchestrator && chown -R appuser:appuser /var/lib/orchestrator
+    mkdir -p /var/lib/orchestrator && chown -R appuser:appuser /var/lib/orchestrator && \
+    mkdir -p /home/appuser/.cache/uv && chown -R appuser:appuser /home/appuser/.cache
 USER appuser
 
-EXPOSE 42069
+ENV UV_CACHE_DIR=/home/appuser/.cache/uv
+
+EXPOSE 42169
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:42069/docs || exit 1
+    CMD curl -f http://localhost:42169/docs || exit 1
 
 CMD ["python", "-m", "orchestrator.server"]

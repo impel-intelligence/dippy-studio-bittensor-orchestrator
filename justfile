@@ -1,172 +1,167 @@
 #!/usr/bin/env just --justfile
 
+# ═══════════════════════════════════════════════════════════════════════════
+# HELP & DEFAULT
+# ═══════════════════════════════════════════════════════════════════════════
+
 default:
 	@just --list
 
-setup: _ensure-venv
-	source .venv/bin/activate
-	echo "🔧 Setting up project..."
-	uv pip install -e .
-	if [ -f "requirements.miner.txt" ]; then
-		echo "📦 Installing miner dependencies..."
-		uv pip install -r requirements.miner.txt
-	fi
-	if [ -f "requirements.orchestrator.txt" ]; then
-		echo "📦 Installing orchestrator dependencies..."
-		uv pip install -r requirements.orchestrator.txt
-	fi
-	if [ -f "requirements.validator.txt" ]; then
-		echo "📦 Installing validator dependencies..."
-		uv pip install -r requirements.validator.txt
-	fi
-	echo "📦 Installing test dependencies..."
-	uv pip install pytest pytest-cov pytest-mock
-	echo "✅ Setup complete!"
+# ═══════════════════════════════════════════════════════════════════════════
+# LOCAL DEVELOPMENT
+# ═══════════════════════════════════════════════════════════════════════════
 
+# Build and start the local dev stack
 up:
-	docker compose --file docker-compose-dev.yml up -d --build
+	docker compose --file docker-compose-local.yml up -d --build
+	@echo "🚀 Orchestrator running at http://localhost:42169 (Docker)"
+	@echo "   View logs: just devlogs or just orclogs"
 
-down:
-	docker compose -f docker-compose-dev.yml down
+# Start local dev stack without rebuilding
+local:
+	docker compose --file docker-compose-local.yml up -d
+	@echo "🚀 Orchestrator running at http://localhost:42169 (Docker)"
+	@echo "   View logs: just devlogs or just orclogs"
 
+# Rebuild and restart only the orchestrator-dev service
+local-rebuild:
+	docker compose --file docker-compose-local.yml up -d --build orchestrator-dev
+	@echo "🚀 Orchestrator running at http://localhost:42169 (Docker)"
+	@echo "   View logs: just devlogs or just orclogs"
+
+# Stop the local dev stack
+local-down:
+	docker compose --file docker-compose-local.yml down
+	@echo "🛑 Local stack stopped"
+
+# Tail logs for both orchestrator and jobrelay
 devlogs:
-	docker compose --file docker-compose-dev.yml logs -f orchestrator-dev
+	docker compose --file docker-compose-local.yml logs -f orchestrator-dev jobrelay
 
-dev:
-	docker compose --file docker-compose-dev.yml up -d
-	@echo "🚀 Orchestrator running at http://localhost:42069 (Docker)"
-	@echo "   View logs: just devlogs"
-dev-rebuild:
-	docker compose --file docker-compose-dev.yml up -d --build orchestrator-dev
-	@echo "🚀 Orchestrator running at http://localhost:42069 (Docker)"
-	@echo "   View logs: just devlogs"
+# Tail logs for orchestrator only
+orclogs:
+	docker compose --file docker-compose-local.yml logs -f orchestrator-dev
 
+# Restart the orchestrator-dev service
 orchestrator-restart:
-	docker compose --file docker-compose-dev.yml restart orchestrator-dev
+	docker compose --file docker-compose-local.yml restart orchestrator-dev
 	@echo "🔁 Restarted orchestrator-dev"
 
-functional-tests: _ensure-venv
-	source .venv/bin/activate
-	API_BASE_URL="${API_BASE_URL:-http://localhost:42069}" pytest functional_tests
+# ═══════════════════════════════════════════════════════════════════════════
+# PRODUCTION
+# ═══════════════════════════════════════════════════════════════════════════
 
-unit-test: _ensure-venv
-	source .venv/bin/activate
-	echo "🧪 Running unit tests..."
-	test_failed=0
-	
-	if [ -d "orchestrator/tests" ] && [ "$(ls -A orchestrator/tests/test_*.py 2>/dev/null)" ]; then
-		echo "📦 Running orchestrator unit tests..."
-		python -m pytest orchestrator/tests/ -v || test_failed=1
-	fi
-	
-	if [ -d "miner/tests" ] && [ "$(ls -A miner/tests/test_*.py 2>/dev/null)" ]; then
-		echo "📦 Running miner unit tests..."
-		python -m pytest miner/tests/ -v || test_failed=1
-	fi
-	
-	if [ -d "validator/tests" ] && [ "$(ls -A validator/tests/test_*.py 2>/dev/null)" ]; then
-		echo "📦 Running validator unit tests..."
-		python -m pytest validator/tests/ -v || test_failed=1
-	fi
-	
-	if [ -d "epistula/tests" ] && [ "$(ls -A epistula/tests/test_*.py 2>/dev/null)" ]; then
-		echo "📦 Running epistula unit tests..."
-		python -m pytest epistula/tests/ -v || test_failed=1
-	fi
-	
-	exit $test_failed
+# Start prod-equivalent stack
+prod-up:
+	docker compose --file docker-compose-prod.yml up -d --build
+	@echo "🚀 Prod-equivalent stack running at http://localhost:42169 (Docker)"
+	@echo "   View logs: just prod-logs"
 
-unit-test-coverage: _ensure-venv
-	source .venv/bin/activate
-	echo "🧪 Running unit tests with coverage..."
-	python -m pytest \
-		orchestrator/tests/ \
-		miner/tests/ \
-		validator/tests/ \
-		epistula/tests/ \
-		-v \
-		--cov=orchestrator \
-		--cov=miner \
-		--cov=validator \
-		--cov=epistula \
-		--cov-report=term-missing \
-		--cov-report=html \
-		--ignore=functional_tests/
+# Stop prod-equivalent stack
+prod-down:
+	docker compose --file docker-compose-prod.yml down
+	@echo "🛑 Prod-equivalent stack stopped"
 
-unit-test-specific test: _ensure-venv
-	source .venv/bin/activate
-	echo "🧪 Running specific test: {{test}}"
-	python -m pytest {{test}} -vv -s
+# Tail logs for prod stack
+prod-logs:
+	docker compose --file docker-compose-prod.yml logs -f orchestrator-prod jobrelay-prod
 
+# ═══════════════════════════════════════════════════════════════════════════
+# WORKERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Run metagraph refresh worker once
+run-metagraph-once:
+	docker compose --file docker-compose-local.yml exec orchestrator-dev \
+		python -m orchestrator.workers metagraph
+
+# Run score ETL worker once
+run-score-etl-once hotkey='':
+	@if [ -n "{{hotkey}}" ]; then \
+		HOTKEY_FLAG="--hotkey {{hotkey}}"; \
+	else \
+		HOTKEY_FLAG=""; \
+	fi; \
+	docker compose --file docker-compose-local.yml exec orchestrator-dev \
+		python -m orchestrator.workers score $HOTKEY_FLAG
+
+# Run all workers once (metagraph + score ETL)
+run-workers-once:
+	docker compose --file docker-compose-local.yml exec orchestrator-dev \
+		python -m orchestrator.workers all
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DATABASE MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Start standalone database
+db-up:
+	docker compose --file docker-compose-db.yml up -d
+
+# Stop standalone database
+db-down:
+	docker compose --file docker-compose-db.yml down
+
+# Build database schema migration image
+db-schema-build:
+	docker build -t just-orchestrator-db-schema:local database
+
+# Run database migrations (requires DATABASE_URL env var)
+db-migrate: db-schema-build
+	@if [ -z "${DATABASE_URL}" ]; then echo "✗ DATABASE_URL must be set"; exit 1; fi
+	docker run --rm --network host -e DATABASE_URL="${DATABASE_URL}" just-orchestrator-db-schema:local
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TESTING
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Start integration test database
+integration-up:
+	docker compose --file docker-compose-integration.yml up -d
+	@echo "🗄️  Integration Postgres listening on postgresql://orchestrator:orchestrator@localhost:15432/orchestrator_test"
+
+# Stop integration test database and clean volumes
+integration-down:
+	docker compose --file docker-compose-integration.yml down -v
+
+# Run migrations on integration test database
+integration-migrate:
+	DATABASE_URL=${DATABASE_URL:-${INTEGRATION_DATABASE_URL:-postgresql://orchestrator:orchestrator@localhost:15432/orchestrator_test?sslmode=disable}} just db-migrate
+
+# Run integration tests
+integration-test args="": integration-migrate
+	uv pip sync requirements.orchestrator.txt
+	INTEGRATION_DATABASE_URL=${INTEGRATION_DATABASE_URL:-postgresql://orchestrator:orchestrator@localhost:15432/orchestrator_test?sslmode=disable} \
+		uv run --with pytest --with-requirements requirements.orchestrator.txt \
+			pytest -m "integration" orchestrator/tests/integration {{args}}
+
+# Run functional tests against running orchestrator
+functional-tests:
+	API_BASE_URL="${API_BASE_URL:-http://localhost:42169}" \
+		uv run --with pytest pytest functional_tests
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Sync uv dependencies
+uv-sync:
+	uv pip sync requirements.orchestrator.txt
+
+# Check import structure
 imports-check:
-	python3 scripts/check_imports.py orchestrator
+	uv run python scripts/check_imports.py orchestrator
 
-_ensure-venv:
-	if [ ! -d ".venv" ]; then
-		echo "✗ Virtual environment not found at .venv"
-		echo "Please create it with: uv venv"
-		exit 1
-	fi
-	if [ ! -f ".venv/bin/activate" ]; then
-		echo "✗ Virtual environment appears corrupted (no activate script)"
-		exit 1
-	fi
-	if ! uv pip show sn11 > /dev/null 2>&1; then
-		echo "📦 Installing package in editable mode for absolute imports..."
-		uv pip install -e .
-	fi
-
+# Check environment configuration
 check-env:
 	@test -f .env && echo "✓ .env exists" || echo "✗ .env missing"
 	@test -f .env.example && echo "✓ .env.example exists" || echo "✗ .env.example missing"
 
+# Check Docker status
 check-docker:
 	@echo "Checking Docker containers..."
-	@docker compose ps || echo "✗ Docker compose not available"
+	@docker compose -f docker-compose-local.yml ps || echo "✗ Docker compose not available"
 
-check-venv:
-	@test -d .venv && echo "✓ Virtual environment exists" || echo "✗ Virtual environment missing"
-	@test -d .venv && echo "✓ Python version: $(. .venv/bin/activate && python --version)" || true
-
-check-deps:
-	@test -d .venv && echo "✓ Packages: $(. .venv/bin/activate && uv pip list | wc -l)" || echo "✗ Cannot check - venv missing"
-
-check: check-env check-docker check-venv check-deps
+# Run all checks
+check: check-env check-docker
 	@echo "\n=== All checks completed ==="
-
-clean:
-	docker compose down
-	docker system prune -f
-
-validator-test coldkey="default" hotkey="default":
-	if [ ! -d ".vali" ]; then
-		echo "✗ Validator virtual environment not found at .vali"
-		echo "Please create it first with your validator dependencies"
-		exit 1
-	fi
-	if [ ! -f ".vali/bin/activate" ]; then
-		echo "✗ Validator virtual environment appears corrupted (no activate script)"
-		exit 1
-	fi
-	
-	source .vali/bin/activate
-	echo "✓ Activated validator virtual environment"
-	echo "Running validator with:"
-	echo "  - Network: test"
-	echo "  - Mode: immediate"
-	echo "  - Coldkey: {{coldkey}}"
-	echo "  - Hotkey: {{hotkey}}"
-	echo ""
-	
-	python validator/validator.py \
-		--network test \
-		--netuid 231 \
-		--immediate \
-		--wallet.name {{coldkey}} \
-		--wallet.hotkey {{hotkey}} \
-		--logging.debug
-
-miner-dev:
-	docker compose --file docker-compose-miner.yml up -d --build miner-dev
-	@echo "🚀 Miner running at http://localhost:${MINER_PORT:-8001} (Docker)"
-	@echo "   Stop with: docker compose -f docker-compose-miner.yml down"

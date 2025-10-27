@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional, Tuple
 
 from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient, Miner
+from orchestrator.common.model_utils import dump_model
 from orchestrator.common.structured_logging import StructuredLogger
 
 
@@ -13,7 +14,7 @@ StateResult = Tuple[dict[str, Miner], Optional[int]]
 
 
 class MetagraphStateRunner:
-    """Periodically refresh the metagraph state using a background fetcher."""
+    """Fetch, validate, and persist a single snapshot of the metagraph state."""
 
     def __init__(
         self,
@@ -21,82 +22,19 @@ class MetagraphStateRunner:
         miner_metagraph_client: LiveMinerMetagraphClient,
         netuid: int,
         network: str,
-        interval_seconds: float = 300.0,
+        subnet_fetcher: Callable[[int, str], Optional[StateResult]],
         logger: StructuredLogger | logging.Logger | None = None,
-        subnet_fetcher: Optional[
-            Callable[[int, str], Optional[StateResult]]
-        ] = None,
     ) -> None:
         self._miner_metagraph_client = miner_metagraph_client
         self._netuid = netuid
         self._network = network
-        self._interval_seconds = interval_seconds
         self._fetch_subnet_state = subnet_fetcher
         self._logger: StructuredLogger | logging.Logger = (
             logger if logger is not None else logging.getLogger(__name__)
         )
-        self._task: Optional[asyncio.Task[None]] = None
-        self._stop_event: Optional[asyncio.Event] = None
-
-    async def start(self) -> None:
-        """Begin periodic refresh loop."""
-        if self._task is not None:
-            return
-
-        if self._fetch_subnet_state is None:
-            self._log(
-                "debug",
-                "metagraph.sync.skipped_no_fetcher",
-                netuid=self._netuid,
-                network=self._network,
-            )
-            return
-
-        self._stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-
-        self._task = loop.create_task(self._run())
-
-    async def stop(self) -> None:
-        """Stop the refresh loop if running."""
-        if self._task is None or self._stop_event is None:
-            return
-
-        self._stop_event.set()
-        try:
-            await self._task
-        finally:
-            self._task = None
-            self._stop_event = None
 
     async def run_once(self) -> None:
-        """Execute a single refresh cycle immediately."""
-        await self._sync()
-
-    async def _run(self) -> None:
-        assert self._stop_event is not None
-
-        while not self._stop_event.is_set():
-            await self._sync()
-            try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=self._interval_seconds
-                )
-            except asyncio.TimeoutError:
-                continue
-
-    async def _sync(self) -> None:
-        if self._fetch_subnet_state is None:
-            self._log(
-                "debug",
-                "metagraph.sync.skipped_no_fetcher",
-                netuid=self._netuid,
-                network=self._network,
-            )
-            return
-
-        loop = asyncio.get_running_loop()
-
+        """Execute one metagraph refresh cycle."""
         self._log(
             "info",
             "metagraph.sync.start",
@@ -105,8 +43,7 @@ class MetagraphStateRunner:
         )
 
         try:
-            state_result: Optional[StateResult] = await loop.run_in_executor(
-                None,
+            state_result = await asyncio.to_thread(
                 self._fetch_subnet_state,
                 self._netuid,
                 self._network,
@@ -174,15 +111,21 @@ class MetagraphStateRunner:
             client_db_path=getattr(self._miner_metagraph_client, "db_path", None),
         )
 
+        if self._should_log_debug():
+            self._log_debug_state(block=block)
+
+    def _should_log_debug(self) -> bool:
+        logger = self._logger
+        if isinstance(logger, StructuredLogger):
+            # StructuredLogger wraps a stdlib logger in `_logger`.
+            return logger._logger.isEnabledFor(logging.DEBUG)  # type: ignore[attr-defined]
+        return logger.isEnabledFor(logging.DEBUG)
+
+    def _log_debug_state(self, *, block: Optional[int]) -> None:
         persisted_state = self._miner_metagraph_client.dump_full_state()
         serialized_state: dict[str, Any] = {}
         for hotkey, miner in persisted_state.items():
-            if hasattr(miner, "model_dump"):
-                serialized_state[hotkey] = miner.model_dump()
-            elif hasattr(miner, "dict"):
-                serialized_state[hotkey] = miner.dict()
-            else:
-                serialized_state[hotkey] = miner
+            serialized_state[hotkey] = dump_model(miner)
 
         self._log(
             "debug",

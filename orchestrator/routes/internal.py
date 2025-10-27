@@ -1,49 +1,27 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from epistula.epistula import load_keypair_from_env
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 
+from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient, Miner
 from orchestrator.common.job_store import Job, JobStatus, JobType
 from orchestrator.dependencies import (
-    get_health_service,
     get_job_service,
     get_miner_metagraph_client,
-    get_listen_service,
     get_score_service,
 )
-from orchestrator.services.health_service import HealthService
-from orchestrator.services.job_service import JobService
-from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient, Miner
-from orchestrator.dependencies import get_structured_logger, get_callback_service
-from orchestrator.common.structured_logging import StructuredLogger
-from orchestrator.services.callback_service import CallbackService, CALLBACK_SECRET_HEADER
-from epistula.epistula import load_keypair_from_env
-from orchestrator.services.listen_service import ListenService
 from orchestrator.schemas.job import JobRecord
-from orchestrator.schemas.scores import ScorePayload, ScoreValue, ScoresResponse
-from orchestrator.services.score_service import ScoreRecord, ScoreService, build_scores_from_state
-from pydantic import BaseModel
+from orchestrator.services.job_service import JobService
+from orchestrator.services.score_service import ScoreRecord, ScoreService
 
 
-LISTEN_AUTH_HEADER = "X-Service-Auth-Secret"
-LISTEN_AUTH_SECRET = "orchestrator-listen-secret"
-
-logger = logging.getLogger("orchestrator.routes")
-
-class ListenRequest(BaseModel):
-    job_type: JobType
-    payload: Any
-    job_id: uuid.UUID | None = None
-
-
-class ResultRequest(BaseModel):
-    payload: Any
+logger = logging.getLogger("orchestrator.routes.internal")
 
 
 class CreateJobRequest(BaseModel):
@@ -56,8 +34,12 @@ class UpdateJobRequest(BaseModel):
     payload: Any
 
 
-class ListenResponse(BaseModel):
-    job_id: uuid.UUID
+class StatsResponse(BaseModel):
+    epistula_loaded: bool
+    epistula_ss58: Optional[str]
+    metagraph_last_updated: Optional[str]
+    job_total: int
+    job_completed: int
 
 
 class MetagraphDumpResponse(BaseModel):
@@ -65,23 +47,6 @@ class MetagraphDumpResponse(BaseModel):
     block: int | None = None
     meta: dict[str, Any] | None = None
     last_updated: Optional[str] = None
-
-
-class CallbackResponse(BaseModel):
-    status: str
-    message: str
-
-
-class CallbackListResponse(BaseModel):
-    callbacks: list[dict[str, Any]]
-
-
-class StatsResponse(BaseModel):
-    epistula_loaded: bool
-    epistula_ss58: Optional[str]
-    metagraph_last_updated: Optional[str]
-    job_total: int
-    job_completed: int
 
 
 class LiveJobDumpResponse(BaseModel):
@@ -101,26 +66,47 @@ class RawDumpEntry(BaseModel):
     converted_score: ScoreRecord
 
 
+class MinerUpsertRequest(BaseModel):
+    hotkey: Optional[str] = None
+    uid: int = 0
+    network_address: str = "http://localhost"
+    valid: bool = False
+    alpha_stake: int = 0
+    capacity: Dict[str, Any] = Field(default_factory=dict)
+
+    def to_miner(self, *, hotkey_override: str | None = None) -> Miner:
+        payload = self.model_dump() if hasattr(self, "model_dump") else self.dict()
+        effective_hotkey = hotkey_override or payload.get("hotkey")
+        if not effective_hotkey:
+            raise ValueError("Miner hotkey is required")
+        payload["hotkey"] = effective_hotkey
+        return Miner(**payload)
+
+
+class MinerListResponse(BaseModel):
+    miners: Dict[str, Miner]
+
+
+class MinerDeleteResponse(BaseModel):
+    status: str
+    hotkey: str
+
+
 def create_internal_router() -> APIRouter:
     router = APIRouter(prefix="/_internal")
 
-    @router.post(
-        "/job", response_model=Job, status_code=status.HTTP_201_CREATED
-    )
+    @router.post("/job", response_model=Job, status_code=status.HTTP_201_CREATED)
     async def create_job(
         request: CreateJobRequest,
         job_service: JobService = Depends(get_job_service),
     ) -> Job:
-        """Create a new job using the job relay service."""
         return await job_service.create_job(
             job_type=request.job_type,
             payload=request.payload,
             hotkey=request.hotkey,
         )
 
-    @router.put(
-        "/job/{job_id}", response_model=Job, status_code=status.HTTP_200_OK
-    )
+    @router.put("/job/{job_id}", response_model=Job, status_code=status.HTTP_200_OK)
     async def update_job(
         job_id: uuid.UUID,
         request: UpdateJobRequest,
@@ -128,11 +114,7 @@ def create_internal_router() -> APIRouter:
     ) -> Job:
         return await job_service.update_job(job_id=job_id, payload=request.payload)
 
-    @router.get(
-        "/stats",
-        response_model=StatsResponse,
-        status_code=status.HTTP_200_OK,
-    )
+    @router.get("/stats", response_model=StatsResponse, status_code=status.HTTP_200_OK)
     async def stats(
         job_service: JobService = Depends(get_job_service),
         metagraph: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
@@ -147,15 +129,12 @@ def create_internal_router() -> APIRouter:
                 metagraph_last_update = last_update_dt.isoformat()
 
         job_totals = await job_service.get_job_totals()
-        job_total = job_totals["total"]
-        job_completed = job_totals["completed"]
-
         return StatsResponse(
             epistula_loaded=keypair is not None,
             epistula_ss58=epistula_ss58,
             metagraph_last_updated=metagraph_last_update,
-            job_total=job_total,
-            job_completed=job_completed,
+            job_total=job_totals["total"],
+            job_completed=job_totals["completed"],
         )
 
     @router.get(
@@ -180,8 +159,6 @@ def create_internal_router() -> APIRouter:
         ),
         job_service: JobService = Depends(get_job_service),
     ) -> LiveJobDumpResponse:
-        """Dump live jobs from the job relay with optional filtering."""
-
         statuses: set[JobStatus] | None = set(status_filter) if status_filter else None
         if active_only:
             pending_only = {JobStatus.PENDING}
@@ -240,6 +217,70 @@ def create_internal_router() -> APIRouter:
             },
         )
 
+    @router.get("/miners", response_model=MinerListResponse, status_code=status.HTTP_200_OK)
+    async def list_miners(
+        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+    ) -> MinerListResponse:
+        return MinerListResponse(miners=client.dump_full_state())
+
+    @router.get(
+        "/miners/{hotkey}",
+        response_model=Miner,
+        status_code=status.HTTP_200_OK,
+    )
+    async def get_miner_record(
+        hotkey: str,
+        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+    ) -> Miner:
+        miner = client.get_miner(hotkey)
+        if miner is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Miner not found")
+        return miner
+
+    @router.post(
+        "/miners",
+        response_model=Miner,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_miner_record(
+        request: MinerUpsertRequest,
+        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+    ) -> Miner:
+        try:
+            miner = client.upsert_miner(request.to_miner())
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        return miner
+
+    @router.put(
+        "/miners/{hotkey}",
+        response_model=Miner,
+        status_code=status.HTTP_200_OK,
+    )
+    async def update_miner_record(
+        hotkey: str,
+        request: MinerUpsertRequest,
+        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+    ) -> Miner:
+        try:
+            miner = client.upsert_miner(request.to_miner(hotkey_override=hotkey))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        return miner
+
+    @router.delete(
+        "/miners/{hotkey}",
+        response_model=MinerDeleteResponse,
+        status_code=status.HTTP_200_OK,
+    )
+    async def delete_miner_record(
+        hotkey: str,
+        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+    ) -> MinerDeleteResponse:
+        if not client.delete_miner(hotkey):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Miner not found")
+        return MinerDeleteResponse(status="deleted", hotkey=hotkey)
+
     async def _collect_and_persist_scores(
         *,
         job_service: JobService,
@@ -257,49 +298,46 @@ def create_internal_router() -> APIRouter:
 
         jobs_by_hotkey: Dict[str, list[dict[str, Any]]] = {}
         for job in job_records:
-            hotkey = job.get("miner_hotkey")
+            hotkey = str(job.get("miner_hotkey", "")).strip()
             if not hotkey:
                 continue
-            jobs_by_hotkey.setdefault(str(hotkey), []).append(job)
+            jobs_by_hotkey.setdefault(hotkey, []).append(job)
 
         miner_state = metagraph.dump_full_state()
         stored_scores = score_service.all()
 
-        hotkeys = set(jobs_by_hotkey.keys()) | set(miner_state.keys()) | set(stored_scores.keys())
+        def _normalize(items: Iterable[str]) -> list[str]:
+            seen: set[str] = set()
+            normalized: list[str] = []
+            for value in items:
+                item = str(value).strip()
+                if not item or item in seen:
+                    continue
+                seen.add(item)
+                normalized.append(item)
+            return normalized
 
-        fresh_scores: Dict[str, ScoreRecord] = {}
+        union_hotkeys = set(jobs_by_hotkey.keys()) | set(miner_state.keys()) | set(stored_scores.keys())
+        normalized_hotkeys = _normalize(union_hotkeys)
+        for hotkey in normalized_hotkeys:
+            jobs_by_hotkey.setdefault(hotkey, [])
+
+        existing_records = {hk: stored_scores[hk] for hk in normalized_hotkeys if hk in stored_scores}
+
+        fresh_scores = score_service.jobs_to_score(
+            jobs_by_hotkey,
+            reference_time=datetime.now(timezone.utc),
+            existing_records=existing_records,
+            hotkeys=normalized_hotkeys,
+        )
+
         snapshot: Dict[str, RawDumpEntry] = {}
-
-        for hotkey in hotkeys:
+        for hotkey in normalized_hotkeys:
             jobs = jobs_by_hotkey.get(hotkey, [])
             completed_jobs_count = sum(
-                1
-                for job in jobs
-                if ScoreService._is_completed_job(job)  # noqa: SLF001
+                1 for job in jobs if ScoreService._is_completed_job(job)  # noqa: SLF001
             )
-
-            existing_record = stored_scores.get(hotkey)
-            extras: Dict[str, Any]
-            is_slashed = False
-            if existing_record is not None:
-                payload = existing_record.model_dump()
-                is_slashed = bool(payload.get("is_slashed", False))
-                extras = {
-                    key: value
-                    for key, value in payload.items()
-                    if key not in {"scores", "is_slashed"}
-                }
-            else:
-                extras = {}
-
-            record_payload: Dict[str, Any] = {
-                "scores": float(completed_jobs_count),
-                "is_slashed": is_slashed,
-                **extras,
-            }
-            score_record = ScoreRecord(**record_payload)
-            fresh_scores[hotkey] = score_record
-
+            score_record = fresh_scores.get(hotkey) or ScoreRecord(scores=0.0, is_slashed=False)
             snapshot[hotkey] = RawDumpEntry(
                 all_jobs_count=len(jobs),
                 completed_jobs_count=completed_jobs_count,
@@ -317,23 +355,6 @@ def create_internal_router() -> APIRouter:
 
         return snapshot
 
-    @router.post(
-        "/scores/trigger",
-        response_model=Dict[str, RawDumpEntry],
-        status_code=status.HTTP_200_OK,
-    )
-    async def trigger_score_pipeline(
-        score_service: ScoreService = Depends(get_score_service),
-        job_service: JobService = Depends(get_job_service),
-        metagraph: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
-    ) -> Dict[str, RawDumpEntry]:
-
-        return await _collect_and_persist_scores(
-            job_service=job_service,
-            score_service=score_service,
-            metagraph=metagraph,
-        )
-
     @router.get(
         "/scores/state",
         response_model=ScoreStateResponse,
@@ -342,8 +363,6 @@ def create_internal_router() -> APIRouter:
     async def get_score_state(
         score_service: ScoreService = Depends(get_score_service),
     ) -> ScoreStateResponse:
-        """Expose the persisted score state for internal diagnostics."""
-
         records = dict(score_service.items())
         last_update = score_service.last_update()
         return ScoreStateResponse(
@@ -362,8 +381,6 @@ def create_internal_router() -> APIRouter:
         job_service: JobService = Depends(get_job_service),
         metagraph: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
     ) -> Dict[str, RawDumpEntry]:
-        """Return aggregated miner/job state without background batching."""
-
         return await _collect_and_persist_scores(
             job_service=job_service,
             score_service=score_service,
@@ -371,110 +388,3 @@ def create_internal_router() -> APIRouter:
         )
 
     return router
-
-
-def create_public_router() -> APIRouter:
-    router = APIRouter()
-
-    @router.post(
-        "/listen", response_model=ListenResponse, status_code=status.HTTP_202_ACCEPTED
-    )
-    async def listen(
-        listen_request: ListenRequest,
-        request: Request,
-        listen_service: ListenService = Depends(get_listen_service),
-        slog: StructuredLogger = Depends(get_structured_logger),
-    ) -> ListenResponse:
-        provided_secret = request.headers.get(LISTEN_AUTH_HEADER)
-        if provided_secret != LISTEN_AUTH_SECRET:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid service auth secret",
-            )
-
-        job_id = await listen_service.process(
-            job_type=listen_request.job_type,
-            payload=listen_request.payload,
-            desired_job_id=listen_request.job_id,
-            slog=slog,
-        )
-
-        return ListenResponse(job_id=job_id)
-
-    @router.get("/scores", response_model=ScoresResponse, status_code=status.HTTP_200_OK)
-    async def get_scores(
-        request: Request,
-        score_service: ScoreService = Depends(get_score_service),
-        metagraph: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
-        job_service: JobService = Depends(get_job_service),
-    ) -> ScoresResponse:
-
-        try:
-            _ = await request.json()
-        except Exception:
-            pass
-
-        last_update = score_service.last_update()
-        if last_update is not None:
-            stored_scores = score_service.all()
-            scores_payload: dict[str, ScorePayload] = {}
-            for hotkey, record in stored_scores.items():
-                status_value = "SLASHED" if record.is_slashed else "COMPLETED"
-                scores_payload[hotkey] = ScorePayload(
-                    status=status_value,
-                    score=ScoreValue(total_score=float(record.scores)),
-                )
-
-            stats = {
-                "source": "score_service",
-                "requested": len(scores_payload),
-                "available": len(scores_payload),
-                "last_updated": last_update.isoformat(),
-            }
-
-            return ScoresResponse(scores=scores_payload, stats=stats)
-
-        state = metagraph.dump_full_state()
-        return await build_scores_from_state(
-            state,
-            job_relay_client=job_service.job_relay,
-        )
-
-    @router.get("/health", status_code=status.HTTP_200_OK)
-    async def health(
-        health_service: HealthService = Depends(get_health_service),
-    ) -> dict[str, str]:
-        return await health_service.get_health_status()
-
-    @router.post(
-        "/results/callback",
-        response_model=CallbackResponse,
-        status_code=status.HTTP_200_OK,
-    )
-    async def receive_results_callback(
-        request: Request,
-        job_id: str = Form(...),
-        status: str = Form(...),
-        completed_at: str = Form(...),
-        error: Optional[str] = Form(None),
-        image: UploadFile | None = File(None),
-        job_service: JobService = Depends(get_job_service),
-        callback_service: CallbackService = Depends(get_callback_service),
-    ) -> CallbackResponse:
-        received_at = datetime.now(timezone.utc)
-        provided_secret = request.headers.get(CALLBACK_SECRET_HEADER)
-
-        response_status, message = await callback_service.process_callback(
-            job_service=job_service,
-            job_id=job_id,
-            status=status,
-            completed_at=completed_at,
-            error=error,
-            provided_secret=provided_secret,
-            image=image,
-            received_at=received_at,
-        )
-
-        return CallbackResponse(status=response_status, message=message)
-
-    return router 

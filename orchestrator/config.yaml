@@ -1,8 +1,14 @@
 database:
-  path: /var/lib/orchestrator/orchestrator_state.db
+  url: postgresql://orchestrator:orchestrator@postgres:5432/orchestrator
+  min_connections: 1
+  max_connections: 10
 
 metagraph:
-  db_path: null
+  table: miners
+
+subnet:
+  netuid: 11
+  network: finney
 
 audit_sample_size: 0.1
 metagraph_runner_interval: 300
@@ -17,6 +23,11 @@ callback:
 
 jobrelay:
   enabled: true
-  base_url: http://jobrelay:8081
-  auth_token: secret-key-goes-here
+  base_url: http://jobrelay:8181
+  auth_token: x
   timeout_seconds: 5.0
+
+scores:
+  ema_alpha: 1.0
+  ema_half_life_seconds: 604800
+  failure_penalty_weight: 0.2
