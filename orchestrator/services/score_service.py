@@ -835,13 +835,10 @@ class ScoreHistory:
         self.last_success_at = event
         self.last_ema_update_at = event
         self.legacy_score = self._compute_legacy()
-        if job is not None:
-            job_id = job.get('job_id')
-            if job_id is not None:
-                self.extra_fields['last_job_id'] = job_id
         self.extra_fields['failure_penalty_weight'] = self.settings.failure_penalty_weight
         self.extra_fields['decay_half_life_seconds'] = self.settings.ema_half_life_seconds
         self.extra_fields['ema_alpha'] = self.settings.ema_alpha
+        self._register_event_metadata(event, job)
 
     def register_failure(self, event_time: datetime, job: Mapping[str, Any] | None = None) -> None:
         event = self._ensure_aware(event_time)
@@ -852,10 +849,7 @@ class ScoreHistory:
         if self.scores > 0.0:
             candidate = min(self.scores, candidate)
         self.scores = max(candidate, 0.0)
-        if job is not None:
-            job_id = job.get('job_id')
-            if job_id is not None:
-                self.extra_fields['last_job_id'] = job_id
+        self._register_event_metadata(event, job)
 
     def to_payload(self) -> dict[str, Any]:
         payload = {**self.extra_fields}
@@ -879,6 +873,33 @@ class ScoreHistory:
 
     def to_record(self) -> 'ScoreRecord':
         return ScoreRecord(**self.to_payload())
+
+    def _register_event_metadata(self, event_time: datetime, job: Mapping[str, Any] | None) -> None:
+        event = self._ensure_aware(event_time)
+        event_iso = event.isoformat()
+
+        job_id: str | None = None
+        if job is not None:
+            identifier = job.get('job_id')
+            if identifier is not None:
+                job_id = str(identifier)
+                self.extra_fields['last_job_id'] = job_id
+
+        if self.extra_fields.get('last_event_at') != event_iso:
+            self.extra_fields['last_event_at'] = event_iso
+            if job_id:
+                self.extra_fields['last_event_job_ids'] = [job_id]
+            else:
+                self.extra_fields['last_event_job_ids'] = []
+            return
+
+        if job_id:
+            existing = self.extra_fields.get('last_event_job_ids')
+            if isinstance(existing, list):
+                if job_id not in existing:
+                    existing.append(job_id)
+            else:
+                self.extra_fields['last_event_job_ids'] = [job_id]
 
     def _compute_legacy(self) -> float:
         base = float(self.success_count)
@@ -977,7 +998,33 @@ class ScoreHistory:
             events.append((event_time or reference_time, job))
 
         events.sort(key=lambda item: item[0])
+
+        cutoff_time = cls._parse_datetime(history.extra_fields.get('last_event_at'))
+        raw_cutoff_ids = history.extra_fields.get('last_event_job_ids')
+        cutoff_job_ids: set[str] = set()
+        if isinstance(raw_cutoff_ids, (list, tuple, set)):
+            for item in raw_cutoff_ids:
+                if item is None:
+                    continue
+                cutoff_job_ids.add(str(item))
+        elif isinstance(raw_cutoff_ids, str) and raw_cutoff_ids:
+            cutoff_job_ids.add(raw_cutoff_ids)
+
+        seen_job_ids: set[str] = set()
         for event_time, job in events:
+            job_identifier = job.get('job_id')
+            job_id = str(job_identifier) if job_identifier is not None else None
+
+            if cutoff_time is not None:
+                if event_time < cutoff_time:
+                    continue
+                if job_id is not None and event_time == cutoff_time and job_id in cutoff_job_ids:
+                    continue
+
+            if job_id is not None:
+                if job_id in seen_job_ids:
+                    continue
+
             history.apply_decay(event_time)
             status = str(job.get('status', '')).lower()
             if status == 'success':
@@ -995,6 +1042,11 @@ class ScoreHistory:
                 history.register_success(raw_score, event_time, job=job)
             else:
                 history.register_failure(event_time, job=job)
+
+            if job_id is not None:
+                seen_job_ids.add(job_id)
+                if cutoff_time is not None and event_time == cutoff_time:
+                    cutoff_job_ids.add(job_id)
 
         history.apply_decay(reference_time)
         return history

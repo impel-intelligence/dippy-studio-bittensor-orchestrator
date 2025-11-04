@@ -70,6 +70,15 @@ def _success_job(job_id: str) -> dict[str, Any]:
     }
 
 
+def _failure_job(job_id: str, *, completed_at: str | None = None) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "job_type": "inference",
+        "status": "failed",
+        "completed_at": completed_at or datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @pytest.mark.asyncio
 async def test_run_once_zeroes_scores_when_jobs_cleared() -> None:
     hotkey = "hk-reset"
@@ -117,3 +126,68 @@ async def test_run_once_preserves_scores_on_fetch_failure() -> None:
 
     preserved = repository.store[hotkey]
     assert preserved.scores == pytest.approx(baseline.scores, rel=1e-4)
+
+
+@pytest.mark.asyncio
+async def test_run_once_ignores_previously_processed_jobs() -> None:
+    hotkey = "hk-no-dup"
+    repository = InMemoryScoreRepository()
+    relay = MutableJobRelay()
+    engine = _build_engine(repository, relay)
+
+    relay.jobs_by_hotkey[hotkey] = [_success_job("job-a"), _failure_job("job-b")]
+
+    first_summary = await engine.run_once(trace_hotkeys=[hotkey])
+    assert isinstance(first_summary, ScoreRunSummary)
+
+    initial_record = repository.store[hotkey]
+    assert initial_record.success_count == 1
+    assert initial_record.failure_count == 1
+
+    second_summary = await engine.run_once(trace_hotkeys=[hotkey])
+    assert isinstance(second_summary, ScoreRunSummary)
+
+    repeat_record = repository.store[hotkey]
+    assert repeat_record.success_count == initial_record.success_count
+    assert repeat_record.failure_count == initial_record.failure_count
+    assert repeat_record.sample_count == initial_record.sample_count
+
+
+@pytest.mark.asyncio
+async def test_run_once_processes_new_jobs_with_same_timestamp() -> None:
+    hotkey = "hk-same-timestamp"
+    repository = InMemoryScoreRepository()
+    relay = MutableJobRelay()
+    engine = _build_engine(repository, relay)
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    relay.jobs_by_hotkey[hotkey] = [
+        {
+            "job_id": "job-1",
+            "job_type": "inference",
+            "status": "success",
+            "completed_at": timestamp,
+            "metrics": {"latency_ms": 900},
+        },
+        _failure_job("job-2", completed_at=timestamp),
+    ]
+
+    await engine.run_once(trace_hotkeys=[hotkey])
+    baseline = repository.store[hotkey]
+    assert baseline.success_count == 1
+    assert baseline.failure_count == 1
+
+    relay.jobs_by_hotkey[hotkey].append(
+        {
+            "job_id": "job-3",
+            "job_type": "inference",
+            "status": "success",
+            "completed_at": timestamp,
+            "metrics": {"latency_ms": 700},
+        }
+    )
+
+    await engine.run_once(trace_hotkeys=[hotkey])
+    updated = repository.store[hotkey]
+    assert updated.success_count == 2
+    assert updated.failure_count == 1
