@@ -17,6 +17,7 @@ scratch/
 .scratch_lib
 gcs_service_account.json
 secrets/postgres_db_password.txt
+orchestrator/config.yaml
 config.yaml
 # C extensions
 *.so

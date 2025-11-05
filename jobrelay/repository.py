@@ -31,8 +31,13 @@ class InferenceJobRepository:
     def fetch_all(self) -> List[Dict[str, object]]:
         return self._manager.fetch_all()
 
-    def fetch_for_hotkey(self, miner_hotkey: str) -> List[Dict[str, object]]:
-        return self._manager.fetch_for_hotkey(miner_hotkey)
+    def fetch_for_hotkey(
+        self,
+        miner_hotkey: str,
+        *,
+        since: datetime | None = None,
+    ) -> List[Dict[str, object]]:
+        return self._manager.fetch_for_hotkey(miner_hotkey, since=since)
 
     def delete_expired(self, now: datetime) -> int:
         return self._manager.delete_expired(now)

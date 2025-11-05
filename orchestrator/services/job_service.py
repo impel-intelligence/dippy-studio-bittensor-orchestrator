@@ -4,9 +4,10 @@ import logging
 import secrets
 import time
 import uuid
+import asyncio
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from fastapi import HTTPException, status
 
@@ -22,6 +23,22 @@ from orchestrator.common.job_store import (
 from orchestrator.schemas.job import JobRecord
 
 logger = logging.getLogger(__name__)
+
+
+class JobWaitTimeoutError(TimeoutError):
+    """Raised when a job does not reach a terminal state within the allotted time."""
+
+
+class JobWaitCancelledError(Exception):
+    """Raised when waiting for a job is cancelled (for example, client disconnect)."""
+
+
+_TERMINAL_JOB_STATUSES = {
+    JobStatus.SUCCESS,
+    JobStatus.FAILED,
+    JobStatus.TIMEOUT,
+}
+
 
 class JobService:
 
@@ -199,6 +216,45 @@ class JobService:
                 completed += 1
 
         return {"total": len(records), "completed": completed}
+
+    async def wait_for_terminal_state(
+        self,
+        job_id: uuid.UUID,
+        *,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 1.0,
+        is_disconnected: Callable[[], Awaitable[bool]] | None = None,
+    ) -> Job:
+        """Poll until a job reaches a terminal status or the timeout expires."""
+
+        timeout = float(timeout_seconds)
+        if timeout < 0.0:
+            timeout = 0.0
+        poll_interval = float(poll_interval_seconds)
+        if poll_interval <= 0.0:
+            poll_interval = 0.1
+
+        deadline = time.monotonic() + timeout
+
+        while True:
+            if is_disconnected is not None and await is_disconnected():
+                logger.info("job.wait_cancelled job_id=%s", job_id)
+                raise JobWaitCancelledError("Client disconnected while waiting for job completion")
+
+            job = await self.get_job(job_id)
+            if job.status in _TERMINAL_JOB_STATUSES:
+                return job
+
+            now = time.monotonic()
+            if timeout == 0.0 or now >= deadline:
+                raise JobWaitTimeoutError(f"Job {job_id} did not complete within {timeout} seconds")
+
+            remaining = deadline - now
+            sleep_for = poll_interval if timeout == float("inf") else min(poll_interval, max(remaining, 0.0))
+            if sleep_for <= 0.0:
+                raise JobWaitTimeoutError(f"Job {job_id} did not complete within {timeout} seconds")
+
+            await asyncio.sleep(sleep_for)
 
     async def _sync_job_update(self, job_id: uuid.UUID, updates: Dict[str, Any]) -> None:
         if not updates:

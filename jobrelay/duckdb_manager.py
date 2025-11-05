@@ -87,6 +87,12 @@ class JobRelayDuckDBManager:
         )
         self._write_conn.execute(
             """
+            CREATE INDEX IF NOT EXISTS idx_inference_jobs_hotkey_completed
+            ON inference_jobs(miner_hotkey, completed_at)
+            """
+        )
+        self._write_conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS duckdb_sync_state (
                 id INTEGER PRIMARY KEY,
                 last_snapshot TIMESTAMPTZ
@@ -304,10 +310,26 @@ class JobRelayDuckDBManager:
             columns = [desc[0] for desc in cursor.description]
             return [self._row_to_dict(columns, row) for row in rows]
 
-    def fetch_for_hotkey(self, miner_hotkey: str) -> List[Dict[str, object]]:
+    def fetch_for_hotkey(
+        self,
+        miner_hotkey: str,
+        *,
+        since: datetime | None = None,
+    ) -> List[Dict[str, object]]:
         with self._read_cursor() as cursor:
+            clauses = ["miner_hotkey = ?"]
+            parameters: list[object] = [miner_hotkey]
+            if since is not None:
+                cutoff = since
+                if cutoff.tzinfo is None:
+                    cutoff = cutoff.replace(tzinfo=timezone.utc)
+                else:
+                    cutoff = cutoff.astimezone(timezone.utc)
+                clauses.append("completed_at >= ?")
+                parameters.append(cutoff)
+            where_clause = " AND ".join(clauses)
             cursor.execute(
-                """
+                f"""
                 SELECT job_id, job_type, miner_hotkey, payload,
                        result_image_url, creation_timestamp, last_updated_at,
                        miner_received_at, completed_at, execution_duration_ms,
@@ -317,9 +339,10 @@ class JobRelayDuckDBManager:
                        response_payload, response_timestamp,
                        callback_secret, prompt_seed
                 FROM inference_jobs
-                WHERE miner_hotkey = ?
+                WHERE {where_clause}
+                ORDER BY completed_at ASC, job_id
                 """,
-                [miner_hotkey],
+                parameters,
             )
             rows = cursor.fetchall()
             columns = [desc[0] for desc in cursor.description]

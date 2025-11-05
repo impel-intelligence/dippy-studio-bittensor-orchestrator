@@ -13,13 +13,36 @@ class StubJobRelay(BaseJobRelayClient):
     def __init__(self, jobs_by_hotkey: dict[str, list[dict]]) -> None:
         self._jobs_by_hotkey = jobs_by_hotkey
 
-    async def list_jobs_for_hotkey(self, hotkey: str) -> list[dict]:
-        return self._jobs_by_hotkey.get(hotkey, [])
+    async def list_jobs_for_hotkey(self, hotkey: str, since: datetime | None = None) -> list[dict]:
+        jobs = list(self._jobs_by_hotkey.get(hotkey, []))
+        if since is None:
+            return jobs
+        cutoff = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+        filtered: list[dict] = []
+        for job in jobs:
+            completed = job.get("completed_at")
+            event_time: datetime | None
+            if isinstance(completed, datetime):
+                event_time = completed if completed.tzinfo else completed.replace(tzinfo=timezone.utc)
+            elif isinstance(completed, str):
+                try:
+                    parsed = datetime.fromisoformat(completed.replace("Z", "+00:00"))
+                except ValueError:
+                    parsed = None
+                if parsed is not None and parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                event_time = parsed
+            else:
+                event_time = None
+            if event_time is None or event_time < cutoff:
+                continue
+            filtered.append(job)
+        return filtered
 
 
 class FailingJobRelay(BaseJobRelayClient):
 
-    async def list_jobs_for_hotkey(self, hotkey: str) -> list[dict]:
+    async def list_jobs_for_hotkey(self, hotkey: str, since: datetime | None = None) -> list[dict]:
         raise RuntimeError("boom")
 
 

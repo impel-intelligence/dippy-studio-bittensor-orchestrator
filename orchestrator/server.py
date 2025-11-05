@@ -125,6 +125,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             ema_alpha=self.config.scores.ema_alpha,
             ema_half_life_seconds=self.config.scores.ema_half_life_seconds,
             failure_penalty_weight=self.config.scores.failure_penalty_weight,
+            lookback_days=self.config.scores.lookback_days,
         )
         self.server_context.score_service = self.score_service
 

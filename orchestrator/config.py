@@ -55,6 +55,29 @@ class CallbackConfig:
 
 
 @dataclass
+class ListenSyncConfig:
+    timeout_seconds: float = 10.0
+    poll_interval_seconds: float = 1.0
+
+    def normalized(self) -> "ListenSyncConfig":
+        timeout = _maybe_float(self.timeout_seconds, 10.0) or 10.0
+        if timeout < 0.0:
+            timeout = 0.0
+        poll = _maybe_float(self.poll_interval_seconds, 1.0) or 1.0
+        if poll <= 0.0:
+            poll = 0.1
+        return ListenSyncConfig(
+            timeout_seconds=timeout,
+            poll_interval_seconds=poll,
+        )
+
+
+@dataclass
+class ListenConfig:
+    sync: ListenSyncConfig = field(default_factory=ListenSyncConfig)
+
+
+@dataclass
 class JobRelayConfig:
     enabled: bool = True
     base_url: Optional[str] = "http://localhost:8181"
@@ -70,6 +93,7 @@ class ScoreConfig:
     ema_alpha: float = 1.0
     ema_half_life_seconds: float = 604_800.0
     failure_penalty_weight: float = 0.2
+    lookback_days: float = 7.0
 
     def normalized(self) -> "ScoreConfig":
         alpha = float(self.ema_alpha)
@@ -86,10 +110,15 @@ class ScoreConfig:
         if penalty < 0.0:
             penalty = 0.0
 
+        lookback = float(self.lookback_days)
+        if lookback < 0.0:
+            lookback = 0.0
+
         return ScoreConfig(
             ema_alpha=alpha,
             ema_half_life_seconds=half_life,
             failure_penalty_weight=penalty,
+            lookback_days=lookback,
         )
 
 
@@ -99,6 +128,7 @@ class OrchestratorConfig:
     metagraph: MetagraphConfig = field(default_factory=MetagraphConfig)
     subnet: SubnetConfig = field(default_factory=SubnetConfig)
     callback: CallbackConfig = field(default_factory=CallbackConfig)
+    listen: ListenConfig = field(default_factory=ListenConfig)
     jobrelay: JobRelayConfig = field(default_factory=JobRelayConfig)
     scores: ScoreConfig = field(default_factory=ScoreConfig)
     audit_sample_size: float = 0.1
@@ -148,6 +178,25 @@ class OrchestratorConfig:
             url=callback_data.get("url") or callback_data.get("callback_url"),
         )
 
+        listen_data = data.get("listen", {}) or {}
+        sync_data = listen_data.get("sync", {}) or {}
+        listen_defaults = ListenSyncConfig()
+        sync_timeout = _maybe_float(sync_data.get("timeout_seconds"), listen_defaults.timeout_seconds)
+        if sync_timeout is None:
+            sync_timeout = listen_defaults.timeout_seconds
+        sync_poll = _maybe_float(
+            sync_data.get("poll_interval_seconds"),
+            listen_defaults.poll_interval_seconds,
+        )
+        if sync_poll is None:
+            sync_poll = listen_defaults.poll_interval_seconds
+        listen = ListenConfig(
+            sync=ListenSyncConfig(
+                timeout_seconds=sync_timeout,
+                poll_interval_seconds=sync_poll,
+            ).normalized()
+        )
+
         jobrelay_defaults = JobRelayConfig()
         jobrelay_data = data.get("jobrelay", {}) or {}
         enabled_raw = jobrelay_data.get("enabled")
@@ -172,12 +221,23 @@ class OrchestratorConfig:
         )
 
         scores_data = data.get("scores", {}) or {}
+        ema_alpha_value = _maybe_float(scores_data.get("ema_alpha"), 1.0)
+        if ema_alpha_value is None:
+            ema_alpha_value = 1.0
+        half_life_value = _maybe_float(scores_data.get("ema_half_life_seconds"), 604_800.0)
+        if half_life_value is None:
+            half_life_value = 604_800.0
+        penalty_value = _maybe_float(scores_data.get("failure_penalty_weight"), 0.2)
+        if penalty_value is None:
+            penalty_value = 0.2
+        lookback_value = _maybe_float(scores_data.get("lookback_days"), 7.0)
+        if lookback_value is None:
+            lookback_value = 7.0
         scores = ScoreConfig(
-            ema_alpha=_maybe_float(scores_data.get("ema_alpha"), 1.0) or 1.0,
-            ema_half_life_seconds=_maybe_float(scores_data.get("ema_half_life_seconds"), 604_800.0)
-            or 604_800.0,
-            failure_penalty_weight=_maybe_float(scores_data.get("failure_penalty_weight"), 0.2)
-            or 0.2,
+            ema_alpha=ema_alpha_value,
+            ema_half_life_seconds=half_life_value,
+            failure_penalty_weight=penalty_value,
+            lookback_days=lookback_value,
         ).normalized()
 
         audit_sample_size = float(data.get("audit_sample_size", 0.1))
@@ -188,6 +248,7 @@ class OrchestratorConfig:
             database=database,
             metagraph=metagraph,
             callback=callback,
+            listen=listen,
             jobrelay=jobrelay,
             scores=scores,
             audit_sample_size=audit_sample_size,
@@ -256,6 +317,21 @@ class OrchestratorConfig:
         if "CALLBACK_URL" in env:
             self.callback.url = env["CALLBACK_URL"].strip() or None
 
+        if "LISTEN_SYNC_TIMEOUT_SECONDS" in env:
+            maybe_timeout = _maybe_float(
+                env["LISTEN_SYNC_TIMEOUT_SECONDS"],
+                self.listen.sync.timeout_seconds,
+            )
+            if maybe_timeout is not None:
+                self.listen.sync.timeout_seconds = max(0.0, maybe_timeout)
+        if "LISTEN_SYNC_POLL_INTERVAL_SECONDS" in env:
+            maybe_poll = _maybe_float(
+                env["LISTEN_SYNC_POLL_INTERVAL_SECONDS"],
+                self.listen.sync.poll_interval_seconds,
+            )
+            if maybe_poll is not None and maybe_poll > 0.0:
+                self.listen.sync.poll_interval_seconds = maybe_poll
+
 
         if "EMA_ALPHA" in env:
             alpha = _maybe_float(env["EMA_ALPHA"], self.scores.ema_alpha)
@@ -269,8 +345,14 @@ class OrchestratorConfig:
             penalty = _maybe_float(env["FAILURE_PENALTY_WEIGHT"], self.scores.failure_penalty_weight)
             if penalty is not None:
                 self.scores.failure_penalty_weight = penalty
+        lookback_override_env = env.get("SCORES_LOOKBACK_DAYS") or env.get("LOOKBACK_DAYS")
+        if lookback_override_env is not None:
+            lookback_override = _maybe_float(lookback_override_env, self.scores.lookback_days)
+            if lookback_override is not None:
+                self.scores.lookback_days = lookback_override
 
         self.scores = self.scores.normalized()
+        self.listen.sync = self.listen.sync.normalized()
 
 
 def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None = None) -> OrchestratorConfig:
@@ -321,6 +403,8 @@ __all__ = [
     "SubnetConfig",
     "CallbackConfig",
     "GCSConfig",
+    "ListenConfig",
+    "ListenSyncConfig",
     "JobRelayConfig",
     "ScoreConfig",
     "load_config",

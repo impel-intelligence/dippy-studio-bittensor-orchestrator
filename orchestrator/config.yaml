@@ -24,10 +24,16 @@ callback:
 jobrelay:
   enabled: true
   base_url: http://jobrelay:8181
-  auth_token: x
+  auth_token: token_goes_here
   timeout_seconds: 5.0
 
 scores:
   ema_alpha: 1.0
   ema_half_life_seconds: 604800
   failure_penalty_weight: 0.2
+  lookback_days: 7
+
+listen:
+  sync:
+    timeout_seconds: 10.0
+    poll_interval_seconds: 1.0

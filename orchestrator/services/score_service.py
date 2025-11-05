@@ -258,6 +258,7 @@ class ScoreEngine:
         fetch_concurrency: int = 8,
         score_settings: "ScoreSettings | None" = None,
         score_fn: Callable[[Mapping[str, Any]], float] = job_to_score,
+        lookback_days: float | int | None = 7,
     ) -> None:
         self._repository = repository
         self._job_service = job_service
@@ -268,6 +269,16 @@ class ScoreEngine:
         self._fetch_concurrency = max(1, int(fetch_concurrency)) if fetch_concurrency else 1
         self._score_settings = (score_settings or ScoreSettings()).normalized()
         self._score_fn = score_fn
+        self._lookback_days: float | None = None
+        self._lookback_window: timedelta | None = None
+        if lookback_days is not None:
+            try:
+                normalized_window = float(lookback_days)
+            except (TypeError, ValueError):
+                normalized_window = 0.0
+            if normalized_window > 0.0:
+                self._lookback_days = normalized_window
+                self._lookback_window = timedelta(days=normalized_window)
 
     def set_job_service(self, job_service: "JobService | None") -> None:
         self._job_service = job_service
@@ -293,6 +304,8 @@ class ScoreEngine:
         hotkeys: Iterable[str],
         *,
         include_empty: bool = True,
+        lookback_days: float | None = None,
+        reference_time: datetime | None = None,
     ) -> tuple[Dict[str, list[Mapping[str, Any]]], set[str]]:
         job_service = self._require_job_service()
         job_relay = getattr(job_service, "job_relay", None)
@@ -307,12 +320,26 @@ class ScoreEngine:
         if not hotkey_queue:
             return {}, set()
 
+        reference = reference_time or datetime.now(timezone.utc)
+        window_delta: timedelta | None
+        if lookback_days is None:
+            window_delta = self._lookback_window
+        else:
+            try:
+                window_value = float(lookback_days)
+            except (TypeError, ValueError):
+                window_value = 0.0
+            window_delta = timedelta(days=window_value) if window_value > 0.0 else None
+        cutoff_time: datetime | None = None
+        if window_delta is not None:
+            cutoff_time = reference - window_delta
+
         semaphore = asyncio.Semaphore(self._fetch_concurrency)
 
         async def _fetch_one(hotkey: str) -> tuple[list[Mapping[str, Any]], bool]:
             async with semaphore:
                 try:
-                    jobs = await job_relay.list_jobs_for_hotkey(hotkey)
+                    jobs = await job_relay.list_jobs_for_hotkey(hotkey, since=cutoff_time)
                 except Exception as exc:  # pragma: no cover - network/logging safeguard
                     logger.warning("score_engine.fetch_failed hotkey=%s", hotkey, exc_info=exc)
                     return [], True
@@ -430,7 +457,12 @@ class ScoreEngine:
             max(0, len(normalized_hotkeys) - len(preview)),
         )
 
-        completed_jobs, fetch_failures = await self.fetch_completed_jobs(normalized_hotkeys)
+        window_reference = datetime.now(timezone.utc)
+        completed_jobs, fetch_failures = await self.fetch_completed_jobs(
+            normalized_hotkeys,
+            lookback_days=self._lookback_days,
+            reference_time=window_reference,
+        )
         for hotkey in normalized_hotkeys:
             completed_jobs.setdefault(hotkey, [])
 
@@ -650,6 +682,7 @@ class ScoreService:
         ema_half_life_seconds: float = 604_800.0,
         failure_penalty_weight: float = 0.2,
         score_fn: Callable[[Mapping[str, Any]], float] = job_to_score,
+        lookback_days: float | int | None = 7,
     ) -> None:
         settings = ScoreSettings(
             ema_alpha=ema_alpha,
@@ -658,6 +691,15 @@ class ScoreService:
         ).normalized()
 
         self._repository = ScoreRepository(database_service)
+        self._lookback_days: float | None
+        if lookback_days is None:
+            self._lookback_days = None
+        else:
+            try:
+                candidate = float(lookback_days)
+            except (TypeError, ValueError):
+                candidate = 0.0
+            self._lookback_days = candidate if candidate > 0.0 else None
         self._engine = ScoreEngine(
             repository=self._repository,
             job_service=job_service,
@@ -668,6 +710,7 @@ class ScoreService:
             fetch_concurrency=fetch_concurrency,
             score_settings=settings,
             score_fn=score_fn,
+            lookback_days=self._lookback_days,
         )
 
     @property
@@ -725,8 +768,14 @@ class ScoreService:
         hotkeys: Iterable[str],
         *,
         include_empty: bool = True,
+        lookback_days: float | None = None,
     ) -> tuple[Dict[str, list[Mapping[str, Any]]], set[str]]:
-        return await self._engine.fetch_completed_jobs(hotkeys, include_empty=include_empty)
+        window = lookback_days if lookback_days is not None else self._lookback_days
+        return await self._engine.fetch_completed_jobs(
+            hotkeys,
+            include_empty=include_empty,
+            lookback_days=window,
+        )
 
     def jobs_to_score(
         self,
@@ -969,6 +1018,15 @@ class ScoreHistory:
         logger: logging.Logger | None = None,
     ) -> 'ScoreHistory':
         history = cls.from_record(existing_record, settings=settings)
+        history.scores = 0.0
+        history.ema_score = 0.0
+        history.legacy_score = 0.0
+        history.success_count = 0
+        history.failure_count = 0
+        history.sample_count = 0
+        history.last_success_at = None
+        history.last_ema_update_at = None
+        history.extra_fields.pop('last_job_id', None)
         events: list[tuple[datetime, Mapping[str, Any]]] = []
         for job in jobs:
             if not ScoreService._is_completed_job(job):
@@ -1150,7 +1208,7 @@ async def build_scores_from_state(
     async def _score_hotkey(hotkey: str, miner: Miner) -> tuple[str, ScorePayload, dict[str, Any]]:
         async with semaphore:
             try:
-                jobs = await job_relay_client.list_jobs_for_hotkey(hotkey)
+                jobs = await job_relay_client.list_jobs_for_hotkey(hotkey, since=cutoff)
             except Exception as exc:  # pragma: no cover - defensive network logging
                 logger.warning(
                     "scores.build_from_state.fetch_failed hotkey=%s",

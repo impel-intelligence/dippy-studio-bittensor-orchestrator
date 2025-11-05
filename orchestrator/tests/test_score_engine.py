@@ -39,10 +39,37 @@ class MutableJobRelay(BaseJobRelayClient):
         self.jobs_by_hotkey: dict[str, list[dict[str, Any]]] = {}
         self.fail_for: set[str] = set()
 
-    async def list_jobs_for_hotkey(self, hotkey: str) -> list[dict[str, Any]]:
+    async def list_jobs_for_hotkey(
+        self,
+        hotkey: str,
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
         if hotkey in self.fail_for:
             raise RuntimeError("relay unavailable")
-        return list(self.jobs_by_hotkey.get(hotkey, ()))
+        jobs = list(self.jobs_by_hotkey.get(hotkey, ()))
+        if since is None:
+            return jobs
+        cutoff = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+        filtered: list[dict[str, Any]] = []
+        for job in jobs:
+            completed = job.get("completed_at")
+            event_time: datetime | None
+            if isinstance(completed, datetime):
+                event_time = completed if completed.tzinfo else completed.replace(tzinfo=timezone.utc)
+            elif isinstance(completed, str):
+                try:
+                    parsed = datetime.fromisoformat(completed.replace("Z", "+00:00"))
+                except ValueError:
+                    parsed = None
+                if parsed is not None and parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                event_time = parsed
+            else:
+                event_time = None
+            if event_time is None or event_time < cutoff:
+                continue
+            filtered.append(job)
+        return filtered
 
 
 class StubJobService:
@@ -117,3 +144,31 @@ async def test_run_once_preserves_scores_on_fetch_failure() -> None:
 
     preserved = repository.store[hotkey]
     assert preserved.scores == pytest.approx(baseline.scores, rel=1e-4)
+
+
+@pytest.mark.asyncio
+async def test_run_once_uses_rolling_window_without_double_counting() -> None:
+    hotkey = "hk-rolling"
+    repository = InMemoryScoreRepository()
+    relay = MutableJobRelay()
+    engine = _build_engine(repository, relay)
+
+    job = _success_job("job-rolling")
+    relay.jobs_by_hotkey[hotkey] = [job]
+
+    summary1 = await engine.run_once(trace_hotkeys=[hotkey])
+    assert isinstance(summary1, ScoreRunSummary)
+    record1 = repository.store[hotkey]
+    samples_first = getattr(record1, "sample_count", 0)
+    successes_first = getattr(record1, "success_count", 0)
+    assert samples_first == 1
+    assert successes_first == 1
+
+    summary2 = await engine.run_once(trace_hotkeys=[hotkey])
+    assert isinstance(summary2, ScoreRunSummary)
+    record2 = repository.store[hotkey]
+    samples_second = getattr(record2, "sample_count", 0)
+    successes_second = getattr(record2, "success_count", 0)
+
+    assert samples_second == samples_first
+    assert successes_second == successes_first

@@ -112,9 +112,19 @@ def create_app() -> FastAPI:
     @app.get("/hotkeys/{hotkey}/jobs", dependencies=[auth_dependency])
     async def fetch_jobs_for_hotkey(
         hotkey: str,
+        since: datetime | None = None,
         repository_dep: InferenceJobRepository = Depends(get_repository_dependency),
     ) -> dict:
-        records = [_record_to_dict(item) for item in repository_dep.fetch_for_hotkey(hotkey)]
+        cutoff: datetime | None = None
+        if since is not None:
+            if since.tzinfo is None:
+                cutoff = since.replace(tzinfo=timezone.utc)
+            else:
+                cutoff = since.astimezone(timezone.utc)
+        records = [
+            _record_to_dict(item)
+            for item in repository_dep.fetch_for_hotkey(hotkey, since=cutoff)
+        ]
         return {"jobs": records}
 
     return app
