@@ -3,7 +3,7 @@ services:
   orchestrator-dev:
     build:
       context: .
-      dockerfile: orchestrator/orchestrator.dev.Dockerfile
+      dockerfile: orchestrator.dev.Dockerfile
     command: python orchestrator/server.py --live-reload --port 42169
     ports:
       - "42169:42169"
@@ -33,7 +33,7 @@ services:
   jobrelay:
     build:
       context: .
-      dockerfile: jobrelay/Dockerfile
+      dockerfile: jobrelay.Dockerfile
     ports:
       - "8181:8181"
     volumes:

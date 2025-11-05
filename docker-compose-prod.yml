@@ -3,7 +3,7 @@ services:
     container_name: orchestrator-prod
     build:
       context: .
-      dockerfile: orchestrator/orchestrator.Dockerfile
+      dockerfile: orchestrator.Dockerfile
     image: just-orchestrator:prod-local
     env_file:
       - .env
@@ -37,7 +37,7 @@ services:
     container_name: jobrelay-prod
     build:
       context: .
-      dockerfile: jobrelay/Dockerfile
+      dockerfile: jobrelay.Dockerfile
     image: just-jobrelay:prod-local
     env_file:
       - .env
