@@ -14,6 +14,18 @@ from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.services.job_service import JobService
 
 
+_TASK_TYPE_PAYLOAD_OVERRIDES: dict[JobType, dict[str, str]] = {
+    JobType.FLUX_DEV: {
+        "task_type": JobType.FLUX_DEV.value,
+        "flux_mode": "dev",
+    },
+    JobType.FLUX_KONTEXT: {
+        "task_type": JobType.FLUX_KONTEXT.value,
+        "flux_mode": "kontext",
+    },
+}
+
+
 class ListenEngine:
     """Coordinate miner selection, job creation, and dispatch."""
 
@@ -213,7 +225,25 @@ class ListenEngine:
                 raise ValueError("Job payload missing callback_url")
 
         payload_copy["callback_url"] = callback_url
+        self._apply_task_type_overrides(job, payload_copy)
         return payload_copy
+
+    def _apply_task_type_overrides(self, job: Any, payload: dict[str, Any]) -> None:
+        job_type = getattr(getattr(job, "job_request", None), "job_type", None)
+        try:
+            job_type = JobType(job_type) if job_type is not None else None
+        except ValueError:
+            job_type = None
+
+        if job_type is None:
+            return
+
+        overrides = _TASK_TYPE_PAYLOAD_OVERRIDES.get(job_type)
+        if overrides is None:
+            return
+
+        for key, value in overrides.items():
+            payload.setdefault(key, value)
 
 
 class ListenService:

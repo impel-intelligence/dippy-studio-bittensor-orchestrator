@@ -15,8 +15,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "target",
-        choices=("metagraph", "score", "all"),
-        help="Which worker to execute (or 'all' to run both sequentially)",
+        choices=("metagraph", "score", "audit", "audit-seed", "audit-check", "all"),
+        help=(
+            "Which worker to execute (use 'audit-seed'/'audit-check' for split audit workflows or 'all' "
+            "to run metagraph + score sequentially)"
+        ),
     )
     parser.add_argument(
         "--config",
@@ -38,6 +41,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         dest="trace_hotkeys",
         action="append",
         help="Optional hotkey to trace through the score ETL (repeatable)",
+    )
+    parser.add_argument(
+        "--audit-apply",
+        dest="audit_apply",
+        action="store_true",
+        help="Allow the audit check runner to persist miner validity changes (defaults to dry run)",
     )
     return parser.parse_args(argv)
 
@@ -87,6 +96,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             config_path=args.config_path,
             database_url=args.database_url,
             trace_hotkeys=trace_hotkeys or None,
+            audit_apply_changes=args.audit_apply,
         )
     except Exception:
         logger.exception("runner.failed targets=%s", ",".join(targets))

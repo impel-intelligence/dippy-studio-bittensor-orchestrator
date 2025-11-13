@@ -14,6 +14,7 @@ from orchestrator.common.server_context import ServerContext
 from orchestrator.config import OrchestratorConfig, load_config
 from orchestrator.dependencies import set_dependencies
 from orchestrator.routes import create_internal_router, create_public_router
+from orchestrator.services.audit_service import AuditService
 from orchestrator.services.callback_service import CallbackService
 from orchestrator.services.callback_uploader import BaseUploader, GCSUploader
 from orchestrator.services.database_service import DatabaseService
@@ -128,6 +129,13 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             lookback_days=self.config.scores.lookback_days,
         )
         self.server_context.score_service = self.score_service
+
+        self.audit_service = AuditService(
+            job_service=self.job_service,
+            miner_metagraph_client=self.miner_metagraph_client,
+            audit_sample_size=self.config.audit_sample_size,
+            logger=self.server_context.logger,
+        )
 
         self.app = FastAPI(title="Orchestrator Service", version="0.0.1")
         self._setup_dependencies_and_routes()

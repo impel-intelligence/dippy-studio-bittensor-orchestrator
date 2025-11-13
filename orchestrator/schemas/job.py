@@ -81,6 +81,7 @@ class InferenceJob(_DateTimeModel):
     payload: Dict[str, Any]
 
     result_image_url: Optional[str] = None
+    result_image_sha256: Optional[str] = None
 
     creation_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_updated_at: Optional[datetime] = None
@@ -126,12 +127,21 @@ class JobRecord(InferenceJob):
         response_timestamp: Optional[datetime] = None
         completed_at: Optional[datetime] = None
         last_updated_at: Optional[datetime] = None
+        result_image_url: Optional[str] = None
+        result_image_sha256: Optional[str] = None
 
         if job.job_response is not None:
             response_payload = deepcopy(job.job_response.payload)
             response_timestamp = _ensure_datetime(job.job_response.timestamp)
             completed_at = response_timestamp
             last_updated_at = response_timestamp
+            if isinstance(response_payload, dict):
+                candidate_url = response_payload.get("image_uri")
+                if isinstance(candidate_url, str) and candidate_url.strip():
+                    result_image_url = candidate_url
+                candidate_hash = response_payload.get("image_sha256")
+                if isinstance(candidate_hash, str) and candidate_hash.strip():
+                    result_image_sha256 = candidate_hash
         else:
             last_updated_at = _ensure_datetime(job.dispatched_at or job.prepared_at or job.job_request.timestamp)
 
@@ -143,7 +153,8 @@ class JobRecord(InferenceJob):
             job_type=getattr(job.job_request.job_type, "value", job.job_request.job_type),
             miner_hotkey=job.hotkey,
             payload=request_payload,
-            result_image_url=None,
+            result_image_url=result_image_url,
+            result_image_sha256=result_image_sha256,
             creation_timestamp=_ensure_datetime(job.job_request.timestamp) or datetime.now(timezone.utc),
             last_updated_at=last_updated_at,
             miner_received_at=dispatched_at,

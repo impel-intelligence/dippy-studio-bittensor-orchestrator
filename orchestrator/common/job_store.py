@@ -22,6 +22,8 @@ __all__ = [
 class JobType(str, Enum):
     LORA = "lora"
     GENERATE = "generate"
+    FLUX_DEV = "base-h100_pcie"
+    FLUX_KONTEXT = "img-h100_pcie"
 
 
 class JobStatus(str, Enum):

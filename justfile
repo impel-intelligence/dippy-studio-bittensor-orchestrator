@@ -85,6 +85,25 @@ run-score-etl-once hotkey='':
 	docker compose --file docker-compose-local.yml exec orchestrator-dev \
 		python -m orchestrator.workers score $HOTKEY_FLAG
 
+# Run audit seed worker once
+run-audit-seed-once:
+	docker compose --file docker-compose-local.yml exec orchestrator-dev \
+		python -m orchestrator.workers audit-seed
+
+# Run audit check worker once
+run-audit-check-once apply=false:
+	@if [ "{{apply}}" = "true" ]; then \
+		AUDIT_FLAGS="--audit-apply"; \
+	else \
+		AUDIT_FLAGS=""; \
+	fi; \
+	docker compose --file docker-compose-local.yml exec orchestrator-dev \
+		python -m orchestrator.workers audit-check $AUDIT_FLAGS
+
+# Backwards-compatible alias for audit check
+run-audit-once apply=false:
+	@just run-audit-check-once apply={{apply}}
+
 # Run all workers once (metagraph + score ETL)
 run-workers-once:
 	docker compose --file docker-compose-local.yml exec orchestrator-dev \

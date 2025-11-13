@@ -1,16 +1,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 from fastapi import HTTPException, UploadFile, status
 
+from orchestrator.common.job_store import JobStatus
 from orchestrator.services.callback_uploader import BaseUploader
 from orchestrator.services.job_service import JobService
-from orchestrator.common.job_store import JobStatus
 
 
 CALLBACK_SECRET_HEADER = "X-Callback-Secret"
@@ -59,6 +61,13 @@ class CallbackService:
             image_filename=image_filename,
             image_content_type=image_content_type,
         )
+        if image_info.get("image_uri"):
+            image_hash = await self._hash_remote_image(
+                job_id=job_id,
+                image_uri=str(image_info["image_uri"]),
+            )
+            if image_hash:
+                image_info["image_sha256"] = image_hash
 
         latencies = self._calculate_latencies(job, received_at)
         result_payload = self._compose_result_payload(
@@ -173,6 +182,46 @@ class CallbackService:
             image_filename,
         )
         return {}
+
+    async def _hash_remote_image(self, *, job_id: str, image_uri: str) -> Optional[str]:
+        fetch_url = self._resolve_fetch_url(image_uri)
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(fetch_url)
+                response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001 - network guard
+            logger.warning(
+                "callback.image_hash_fetch_failed job_id=%s uri=%s resolved=%s",
+                job_id,
+                image_uri,
+                fetch_url,
+                exc_info=exc,
+            )
+            return None
+
+        try:
+            digest = hashlib.sha256(response.content).hexdigest()
+        except Exception as exc:  # noqa: BLE001 - hashing guard
+            logger.warning(
+                "callback.image_hash_compute_failed job_id=%s uri=%s",
+                job_id,
+                image_uri,
+                exc_info=exc,
+            )
+            return None
+
+        logger.info(
+            "callback.image_hash_computed job_id=%s uri=%s",
+            job_id,
+            image_uri,
+        )
+        return digest
+
+    @staticmethod
+    def _resolve_fetch_url(image_uri: str) -> str:
+        if image_uri.startswith("gs://"):
+            return f"https://storage.googleapis.com/{image_uri[5:]}"
+        return image_uri
 
     def _calculate_latencies(
         self,

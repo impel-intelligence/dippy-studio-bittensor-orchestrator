@@ -6,6 +6,7 @@
 uv.lock
 .vali
 *.duckdb
+dotinternal
 # Byte-compiled / optimized / compiled Python files
 __pycache__/
 *.py[cod]

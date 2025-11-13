@@ -246,3 +246,76 @@ def test_scores_persist_alongside_miners(database_service: DatabaseService) -> N
     miner_payload, score_payload = row
     assert miner_payload is not None
     assert score_payload is not None
+
+
+class _StubResponse:
+    def __init__(self, status: int = 200) -> None:
+        self.status = status
+
+    def __enter__(self) -> "_StubResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def test_validate_state_preserves_manually_invalidated_miners(
+    database_service: DatabaseService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = LiveMinerMetagraphClient(database_service)
+    hotkey = "hk-audit-invalid"
+    client.upsert_miner(
+        Miner(
+            uid=10,
+            network_address="https://existing",
+            valid=False,
+            alpha_stake=11,
+            hotkey=hotkey,
+        )
+    )
+
+    def _fake_urlopen(*args, **kwargs):  # noqa: ANN001 - signature mirrors stdlib
+        return _StubResponse(status=200)
+
+    monkeypatch.setattr("orchestrator.clients.miner_metagraph.urlopen", _fake_urlopen)
+
+    new_state = {
+        hotkey: Miner(
+            uid=10,
+            network_address="https://example.com",
+            valid=True,
+            alpha_stake=11,
+            hotkey=hotkey,
+        )
+    }
+
+    validated = client.validate_state(new_state)
+    assert validated[hotkey].valid is False
+
+
+def test_validate_state_preserves_manually_validated_miners(database_service: DatabaseService) -> None:
+    client = LiveMinerMetagraphClient(database_service)
+    hotkey = "hk-audit-valid"
+    client.upsert_miner(
+        Miner(
+            uid=22,
+            network_address="https://existing",
+            valid=True,
+            alpha_stake=9,
+            hotkey=hotkey,
+        )
+    )
+
+    new_state = {
+        hotkey: Miner(
+            uid=22,
+            network_address="",
+            valid=False,
+            alpha_stake=9,
+            hotkey=hotkey,
+        )
+    }
+
+    validated = client.validate_state(new_state)
+    assert validated[hotkey].valid is True

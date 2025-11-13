@@ -25,6 +25,7 @@ class Miner(BaseModel):
     alpha_stake: int
     capacity: Dict[str, object] = Field(default_factory=dict)
     hotkey: Optional[str] = None
+    failed_audits: int = Field(default=0, ge=0)
 
 
 class MinerMetagraphClient(ABC):
@@ -48,7 +49,8 @@ PLACEHOLDER_MINER = Miner(
     network_address="https://tmp-test.dippy-bittensor-subnet.com",
     alpha_stake=100000,
     capacity={},
-    hotkey="5EtM9iXMAYRsmt6aoQAoWNDX6yaBnjhmnEQhWKv8HpwkVtML"
+    hotkey="5EtM9iXMAYRsmt6aoQAoWNDX6yaBnjhmnEQhWKv8HpwkVtML",
+    failed_audits=0,
 )
 class LiveMinerMetagraphClient(MinerMetagraphClient):
     def __init__(
@@ -102,6 +104,11 @@ class LiveMinerMetagraphClient(MinerMetagraphClient):
     def validate_state(self, state: Dict[str, Miner]) -> Dict[str, Miner]:
         logger = logging.getLogger(__name__)
         validated_state: Dict[str, Miner] = {}
+        persisted_state: Dict[str, Miner] = {}
+        try:
+            persisted_state = self.dump_state()
+        except Exception as exc:  # pragma: no cover - best effort to preserve validity
+            logger.debug("metagraph.validate_state.persisted_state_failed error=%s", exc)
 
         for key, value in state.items():
             if not isinstance(value, Miner):
@@ -140,13 +147,18 @@ class LiveMinerMetagraphClient(MinerMetagraphClient):
                 except (URLError, HTTPError, Exception) as error:
                     logger.debug("Network address %s unreachable: %s", address_candidate, error)
 
+            existing = persisted_state.get(key)
+            resolved_valid = existing.valid if existing is not None else network_valid
+            failed_audits = getattr(existing, "failed_audits", 0) if existing is not None else 0
+
             updated_miner = Miner(
                 uid=value.uid,
                 network_address=value.network_address,
-                valid=network_valid,
+                valid=resolved_valid,
                 alpha_stake=value.alpha_stake,
                 capacity=value.capacity,
                 hotkey=value.hotkey,
+                failed_audits=failed_audits,
             )
             validated_state[key] = updated_miner
 

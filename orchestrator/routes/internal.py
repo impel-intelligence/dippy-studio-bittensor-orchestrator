@@ -73,6 +73,7 @@ class MinerUpsertRequest(BaseModel):
     valid: bool = False
     alpha_stake: int = 0
     capacity: Dict[str, Any] = Field(default_factory=dict)
+    failed_audits: int = Field(default=0, ge=0)
 
     def to_miner(self, *, hotkey_override: str | None = None) -> Miner:
         payload = self.model_dump() if hasattr(self, "model_dump") else self.dict()
