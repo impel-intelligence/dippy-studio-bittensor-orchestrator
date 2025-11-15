@@ -18,8 +18,3 @@ This repository hosts the orchestration layer that coordinates miners, validator
 ## Database Migrations
 - Run `DATABASE_URL="postgres://..." just db-migrate` to build the Atlas image and apply migrations.
 - Additional Atlas commands and automation guidance live in `database/instructions.md`.
-
-## Additional Documentation
-- `AGENTS.md` captures the end-to-end development playbook used across agents.
-- `INTERNAL.md` aggregates integration-test steps, score persistence notes, and other internal references.
-- `database/instructions.md` describes the Atlas-backed migration pipeline.
