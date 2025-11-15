@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from orchestrator.clients.miner_metagraph import Miner
+from orchestrator.domain.miner import Miner
 from orchestrator.schemas.job import AuditStatus, JobRecord, JobStatus
 from orchestrator.services.audit_service import AuditService
 
@@ -78,7 +78,7 @@ async def test_audit_service_runs_in_dry_mode() -> None:
 
     service = AuditService(
         job_service=job_service,  # type: ignore[arg-type]
-        miner_metagraph_client=miner_client,  # type: ignore[arg-type]
+        miner_metagraph_service=miner_client,  # type: ignore[arg-type]
         audit_sample_size=1.0,
         batch_limit=10,
     )
@@ -113,7 +113,7 @@ async def test_audit_service_updates_validity_when_applied() -> None:
 
     service = AuditService(
         job_service=job_service,  # type: ignore[arg-type]
-        miner_metagraph_client=miner_client,  # type: ignore[arg-type]
+        miner_metagraph_service=miner_client,  # type: ignore[arg-type]
         audit_sample_size=1.0,
         batch_limit=5,
     )

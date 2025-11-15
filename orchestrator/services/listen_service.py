@@ -7,11 +7,12 @@ from urllib import error as urllib_error
 
 from fastapi import HTTPException, status
 
-from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient, Miner
 from orchestrator.common.epistula_client import EpistulaClient
 from orchestrator.common.job_store import JobType
 from orchestrator.common.structured_logging import StructuredLogger
+from orchestrator.domain.miner import Miner
 from orchestrator.services.job_service import JobService
+from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 
 
 _TASK_TYPE_PAYLOAD_OVERRIDES: dict[JobType, dict[str, str]] = {
@@ -25,6 +26,8 @@ _TASK_TYPE_PAYLOAD_OVERRIDES: dict[JobType, dict[str, str]] = {
     },
 }
 
+_KONTEXT_JOB_TYPES: frozenset[JobType] = frozenset({JobType.FLUX_KONTEXT})
+
 
 class ListenEngine:
     """Coordinate miner selection, job creation, and dispatch."""
@@ -32,7 +35,7 @@ class ListenEngine:
     def __init__(
         self,
         job_service: JobService,
-        metagraph: LiveMinerMetagraphClient,
+        metagraph: MinerMetagraphService,
         *,
         epistula_client: EpistulaClient,
         default_callback_url: str | None = None,
@@ -61,7 +64,7 @@ class ListenEngine:
 
         try:
             dispatch_payload = self._build_dispatch_payload(job)
-            inference_url = self._resolve_inference_url(miner)
+            inference_url = self._resolve_inference_url(miner, job_type)
         except Exception as exc:  # noqa: BLE001 - validation guard
             await self._fail_job(
                 job.job_id,
@@ -77,15 +80,15 @@ class ListenEngine:
         return job.job_id
 
     def _select_miner(self, job_type: JobType, slog: StructuredLogger) -> Miner:
-        miner = self._metagraph.fetch_candidate()
+        miner = self._metagraph.fetch_candidate(task_type=job_type.value)
         if miner is None:
             slog.error(
                 "listen.no_candidate",
                 job_type=str(job_type),
             )
             raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="No candidate miner available",
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Candidate miner not found",
             )
         return miner
 
@@ -189,12 +192,15 @@ class ListenEngine:
             **log_fields,
         )
 
-    def _resolve_inference_url(self, miner: Miner) -> str:
+    def _resolve_inference_url(self, miner: Miner, job_type: JobType) -> str:
         address = (miner.network_address or "").strip()
-        if address.endswith("/inference"):
-            return address
+        endpoint = "/edit" if job_type in _KONTEXT_JOB_TYPES else "/inference"
+
         base = address.rstrip("/")
-        return f"{base}/inference"
+        if base.endswith(endpoint):
+            return base or endpoint
+
+        return f"{base}{endpoint}"
 
     def _build_dispatch_payload(self, job: Any) -> dict[str, Any]:
         if not hasattr(job, "job_request"):
@@ -252,7 +258,7 @@ class ListenService:
     def __init__(
         self,
         job_service: JobService,
-        metagraph: LiveMinerMetagraphClient,
+        metagraph: MinerMetagraphService,
         callback_url: Optional[str] = None,
         keypair: Any | None = None,
     ) -> None:

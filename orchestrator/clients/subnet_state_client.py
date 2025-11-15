@@ -17,7 +17,7 @@ except Exception as exc:  # noqa: BLE001 - external dependency guard
 else:
     BT_IMPORT_ERROR = None
 
-from orchestrator.clients.miner_metagraph import Miner
+from orchestrator.domain.miner import Miner
 from orchestrator.runners.metagraph import StateResult
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ def _extract_raw_data(data: dict) -> Optional[str]:
     return None
 
 
-class SubnetStateService:
+class SubnetStateClient:
 
     def __init__(
         self,
@@ -226,4 +226,4 @@ class SubnetStateService:
         return state, block
 
 
-__all__ = ["SubnetStateService"]
+__all__ = ["SubnetStateClient"]

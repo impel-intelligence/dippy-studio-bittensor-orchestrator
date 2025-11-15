@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
-from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient, Miner
+from orchestrator.domain.miner import Miner
+from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.schemas.job import AuditStatus, JobRecord
 from orchestrator.services.job_service import JobService
 
@@ -29,13 +30,13 @@ class AuditService:
         self,
         *,
         job_service: JobService,
-        miner_metagraph_client: LiveMinerMetagraphClient,
+        miner_metagraph_service: MinerMetagraphService,
         audit_sample_size: float = 0.1,
         batch_limit: int = 100,
         logger: logging.Logger | None = None,
     ) -> None:
         self._job_service = job_service
-        self._miner_metagraph_client = miner_metagraph_client
+        self._miner_metagraph_service = miner_metagraph_service
         self._audit_sample_size = self._clamp_sample(audit_sample_size)
         self._batch_limit = max(1, int(batch_limit))
         self._logger = logger if logger is not None else LOGGER
@@ -105,7 +106,7 @@ class AuditService:
         return None
 
     def _apply_validity(self, hotkey: str, is_valid: bool) -> bool:
-        miner = self._miner_metagraph_client.get_miner(hotkey)
+        miner = self._miner_metagraph_service.get_miner(hotkey)
         if miner is None:
             return False
 
@@ -113,7 +114,7 @@ class AuditService:
             return False
 
         updated = self._clone_with_validity(miner, is_valid)
-        self._miner_metagraph_client.upsert_miner(updated)
+        self._miner_metagraph_service.upsert_miner(updated)
         return True
 
     @staticmethod

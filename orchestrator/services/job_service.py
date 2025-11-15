@@ -6,7 +6,7 @@ import time
 import uuid
 import asyncio
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from fastapi import HTTPException, status
@@ -204,6 +204,50 @@ class JobService:
 
         return [JobRecord.from_store(job) for job in jobs]
 
+    async def list_recent_completed_jobs(
+        self,
+        *,
+        max_results: int = 100,
+        lookback_days: float | int | None = 7.0,
+    ) -> list[JobRecord]:
+        """Return the most recent completed jobs bounded by lookback window."""
+
+        if max_results <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Parameter 'max_results' must be a positive integer",
+            )
+
+        records = await self._list_jobs()
+        cutoff_dt: datetime | None = None
+        if lookback_days is not None:
+            try:
+                normalized_days = float(lookback_days)
+            except (TypeError, ValueError):
+                normalized_days = 0.0
+            if normalized_days > 0.0:
+                cutoff_dt = datetime.now(timezone.utc) - timedelta(days=normalized_days)
+
+        completed_items: list[tuple[datetime, Job]] = []
+        completed_states = _TERMINAL_JOB_STATUSES
+        for record in records:
+            status = self._parse_job_status(record.get("status"))
+            if status not in completed_states:
+                continue
+            completed_dt = self._iso_to_datetime(
+                record.get("completed_at") or record.get("response_timestamp")
+            )
+            if completed_dt is None:
+                continue
+            if cutoff_dt is not None and completed_dt < cutoff_dt:
+                continue
+            job = self._job_from_record(record)
+            completed_items.append((completed_dt, job))
+
+        completed_items.sort(key=lambda item: item[0], reverse=True)
+        limited = completed_items[:max_results]
+        return [JobRecord.from_store(job) for _, job in limited]
+
     async def get_job_totals(self) -> dict[str, int]:
         """Return aggregate counts of jobs by basic lifecycle buckets."""
 
@@ -330,6 +374,13 @@ class JobService:
                 return None
             return parsed.astimezone(timezone.utc).timestamp()
         return None
+
+    @staticmethod
+    def _iso_to_datetime(value: Any) -> Optional[datetime]:
+        timestamp = JobService._iso_to_timestamp(value)
+        if timestamp is None:
+            return None
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
 
     @staticmethod
     def _parse_uuid(value: Any) -> Optional[uuid.UUID]:

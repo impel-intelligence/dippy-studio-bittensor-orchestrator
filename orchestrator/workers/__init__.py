@@ -22,7 +22,7 @@ async def _run_metagraph(orchestrator: Orchestrator) -> None:
         orchestrator.config.subnet.network,
     )
     runner = MetagraphStateRunner(
-        miner_metagraph_client=orchestrator.miner_metagraph_client,
+        miner_metagraph_client=orchestrator.miner_metagraph_service,
         netuid=orchestrator.config.subnet.netuid,
         network=orchestrator.config.subnet.network,
         subnet_fetcher=orchestrator.subnet_state_service.fetch_state,

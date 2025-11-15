@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from orchestrator.clients.miner_metagraph import Miner
+from orchestrator.domain.miner import Miner
 from orchestrator.schemas.scores import ScoresResponse
 from orchestrator.services.job_scoring import job_to_score
 from orchestrator.services.score_service import (
@@ -69,7 +69,6 @@ def test_score_history_decay_halflife() -> None:
         "sample_count": 1,
         "last_sample_at": past.isoformat(),
         "ema_last_update_at": past.isoformat(),
-        "is_slashed": False,
     }
 
     history = ScoreHistory.from_jobs(

@@ -7,10 +7,11 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
-from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient, Miner
 from orchestrator.common.structured_logging import StructuredLogger
+from orchestrator.domain.miner import Miner
 from orchestrator.services.audit_service import AuditRunSummary, AuditService
 from orchestrator.services.job_service import JobService
+from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 
 
 class _BaseAuditRunner:
@@ -312,14 +313,14 @@ class AuditCheckRunner(_BaseAuditRunner):
             logger=logger,
         )
         job_service = getattr(audit_service, "_job_service", None)
-        miner_client = getattr(audit_service, "_miner_metagraph_client", None)
+        miner_client = getattr(audit_service, "_miner_metagraph_service", None)
         if not isinstance(job_service, JobService):  # pragma: no cover - defensive guard
             raise ValueError("AuditService must expose JobService for audit checks")
-        if not isinstance(miner_client, LiveMinerMetagraphClient):  # pragma: no cover - defensive guard
-            raise ValueError("AuditService must expose LiveMinerMetagraphClient for audit checks")
+        if not isinstance(miner_client, MinerMetagraphService):  # pragma: no cover - defensive guard
+            raise ValueError("AuditService must expose MinerMetagraphService for audit checks")
         self._job_service: JobService = job_service
         self._job_relay = job_service.job_relay
-        self._miner_client: LiveMinerMetagraphClient = miner_client
+        self._miner_client: MinerMetagraphService = miner_client
 
     async def run_once(self) -> AuditRunSummary | None:  # type: ignore[override]
         self._log(

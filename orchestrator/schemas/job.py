@@ -3,7 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Optional
+import hashlib
+from typing import Any, Dict, Optional, List
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -177,6 +178,40 @@ class JobRecord(InferenceJob):
         )
 
 
+class CompletedJobSummary(BaseModel):
+    job_id: UUID
+    job_type: str
+    miner_hotkey: str
+    status: JobStatus
+    completed_at: datetime
+    failure_reason: Optional[str] = None
+    response_payload: Optional[Dict[str, Any]] = None
+    result_image_url: Optional[str] = None
+    result_image_sha256: Optional[str] = None
+
+    @classmethod
+    def from_job_record(cls, record: JobRecord) -> "CompletedJobSummary":
+        completed = record.completed_at or record.last_updated_at or record.creation_timestamp
+        sanitized_payload = _sanitize_response_payload(record.response_payload)
+        return cls(
+            job_id=record.job_id,
+            job_type=record.job_type,
+            miner_hotkey=record.miner_hotkey,
+            status=record.status,
+            completed_at=completed,
+            failure_reason=record.failure_reason,
+            response_payload=sanitized_payload,
+            result_image_url=record.result_image_url,
+            result_image_sha256=record.result_image_sha256,
+        )
+
+
+class CompletedJobsResponse(BaseModel):
+    jobs: List[CompletedJobSummary]
+    limit: int
+    lookback_days: float
+
+
 def _to_job_status(status: Any) -> JobStatus:
     if isinstance(status, JobStatus):
         return status
@@ -189,8 +224,56 @@ def _to_audit_status(status: Any) -> AuditStatus:
     return AuditStatus(getattr(status, "value", status))
 
 
+def _sanitize_response_payload(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        return payload
+    sanitized: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if _is_callback_secret_field(key):
+            continue
+        sanitized[key] = _sanitize_value(value, key=key)
+    return sanitized
+
+
+def _sanitize_value(value: Any, *, key: Optional[str] = None) -> Any:
+    if isinstance(value, dict):
+        sanitized: Dict[str, Any] = {}
+        for child_key, child_value in value.items():
+            if _is_callback_secret_field(child_key):
+                continue
+            sanitized[child_key] = _sanitize_value(child_value, key=child_key)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_value(item, key=key) for item in value]
+    if _should_mask_field(key):
+        return _hash_sensitive_value(value)
+    return value
+
+
+def _should_mask_field(key: Optional[str]) -> bool:
+    if not key:
+        return False
+    return "prompt" in key.lower()
+
+
+def _is_callback_secret_field(key: Optional[str]) -> bool:
+    if not key:
+        return False
+    return key.lower() == "callback_secret"
+
+
+def _hash_sensitive_value(value: Any) -> str:
+    text = repr(value) if value is not None else ""
+    digest = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+    return f"sha256:{digest}"
+
+
 __all__ = [
     "AuditStatus",
+    "CompletedJobSummary",
+    "CompletedJobsResponse",
     "InferenceJob",
     "JobRecord",
     "JobStatus",

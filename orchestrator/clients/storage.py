@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import logging
@@ -53,6 +52,16 @@ class GCSUploader(BaseUploader):
         self.prefix = self.prefix.strip("/")
         self._client = self._create_client()
         self._bucket = self._client.bucket(self.bucket)
+        credentials_exists = (
+            self.credentials_path.exists() if isinstance(self.credentials_path, Path) else None
+        )
+        self._logger.info(
+            "callback.gcs_uploader_initialized bucket=%s prefix=%s credentials=%s credentials_exists=%s",
+            self.bucket,
+            self.prefix,
+            self.credentials_path,
+            credentials_exists,
+        )
 
     def _create_client(self) -> object:
         if storage is None:
@@ -89,7 +98,17 @@ class GCSUploader(BaseUploader):
         )
 
         blob = self._bucket.blob(blob_name)
-        blob.upload_from_string(content, content_type=content_type)
+        try:
+            blob.upload_from_string(content, content_type=content_type)
+        except Exception:
+            self._logger.exception(
+                "callback.gcs_upload_error bucket=%s blob=%s job_id=%s content_type=%s",
+                self.bucket,
+                blob_name,
+                job_id,
+                content_type,
+            )
+            raise
 
         self._logger.info(
             "callback.gcs_upload_complete bucket=%s blob=%s bytes=%s job_id=%s",

@@ -7,10 +7,10 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from copy import deepcopy
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel
 
-from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient, Miner
+from orchestrator.domain.miner import Miner
 from orchestrator.common.job_store import JobStatus, JobType
 from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.dependencies import (
@@ -19,15 +19,18 @@ from orchestrator.dependencies import (
     get_health_service,
     get_job_service,
     get_listen_service,
-    get_miner_metagraph_client,
+    get_miner_metagraph_service,
     get_score_service,
     get_structured_logger,
 )
+from orchestrator.routes.internal import MetagraphDumpResponse
+from orchestrator.schemas.job import CompletedJobSummary, CompletedJobsResponse
 from orchestrator.schemas.scores import ScorePayload, ScoreValue, ScoresResponse
 from orchestrator.services.callback_service import CallbackService, CALLBACK_SECRET_HEADER
 from orchestrator.services.health_service import HealthService
 from orchestrator.services.job_service import JobService, JobWaitCancelledError, JobWaitTimeoutError
 from orchestrator.services.listen_service import ListenService
+from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.services.score_service import ScoreService, build_scores_from_state
 
 
@@ -199,7 +202,7 @@ def create_public_router() -> APIRouter:
         status_code=status.HTTP_200_OK,
     )
     async def get_last_candidates(
-        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+        client: MinerMetagraphService = Depends(get_miner_metagraph_service),
     ) -> LastCandidatesResponse:
         selections = [
             CandidateSelection(selected_at=selected_at, miner=miner)
@@ -207,35 +210,29 @@ def create_public_router() -> APIRouter:
         ]
         return LastCandidatesResponse(candidates=selections)
 
-    # @router.get("/scores", response_model=ScoresResponse, status_code=status.HTTP_200_OK)
-    # async def get_fake_scores(
-    #     request: Request,
-    #     score_service: ScoreService = Depends(get_score_service),
-    #     metagraph: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
-    #     job_service: JobService = Depends(get_job_service),
-    # ) -> ScoresResponse:
-    #     try:
-    #         _ = await request.json()
-    #     except Exception:
-    #         pass
-    #     scores_payload: dict[str, ScorePayload] = {}
-    #     scores_payload["5EtM9iXMAYRsmt6aoQAoWNDX6yaBnjhmnEQhWKv8HpwkVtML"] = ScorePayload(
-    #                 status="COMPLETED",
-    #                 score=ScoreValue(total_score=1),
-    #             )
-    #     stats = {
-    #             "source": "score_service",
-    #             "requested": len(scores_payload),
-    #             "available": len(scores_payload),
-    #             "last_updated": None,
-    #         }
-    #     return ScoresResponse(scores=scores_payload, stats=stats)
-        
+    @router.get(
+        "/miner_status",
+        response_model=MetagraphDumpResponse,
+        status_code=status.HTTP_200_OK,
+    )
+    async def get_miner_status(
+        client: MinerMetagraphService = Depends(get_miner_metagraph_service),
+    ) -> MetagraphDumpResponse:
+        last_update_dt = client.last_update()
+        last_updated = last_update_dt.isoformat() if last_update_dt else None
+        last_block = client.last_block()
+        return MetagraphDumpResponse(
+            data=client.dump_filtered_state(),
+            block=last_block,
+            last_updated=last_updated,
+            meta=None,
+        )
+
     @router.get("/scores", response_model=ScoresResponse, status_code=status.HTTP_200_OK)
     async def get_scores(
         request: Request,
         score_service: ScoreService = Depends(get_score_service),
-        metagraph: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+        metagraph: MinerMetagraphService = Depends(get_miner_metagraph_service),
         job_service: JobService = Depends(get_job_service),
     ) -> ScoresResponse:
         try:
@@ -246,9 +243,12 @@ def create_public_router() -> APIRouter:
         last_update = score_service.last_update()
         if last_update is not None:
             stored_scores = score_service.all()
+            metagraph_state = metagraph.dump_full_state()
             scores_payload: dict[str, ScorePayload] = {}
             for hotkey, record in stored_scores.items():
-                status_value = "SLASHED" if record.is_slashed else "COMPLETED"
+                miner = metagraph_state.get(hotkey)
+                failed_audits = getattr(miner, "failed_audits", 0) if miner else 0
+                status_value = "SLASHED" if failed_audits else "COMPLETED"
                 scores_payload[hotkey] = ScorePayload(
                     status=status_value,
                     score=ScoreValue(total_score=float(record.scores)),
@@ -268,6 +268,28 @@ def create_public_router() -> APIRouter:
             state,
             job_relay_client=job_service.job_relay,
         )
+
+    @router.get(
+        "/completed_jobs",
+        response_model=CompletedJobsResponse,
+        status_code=status.HTTP_200_OK,
+    )
+    async def get_recent_completed_jobs(
+        limit: int = Query(
+            100,
+            ge=1,
+            le=100,
+            description="Maximum number of completed jobs to return (default 100)",
+        ),
+        job_service: JobService = Depends(get_job_service),
+    ) -> CompletedJobsResponse:
+        lookback_days = 7
+        records = await job_service.list_recent_completed_jobs(
+            max_results=limit,
+            lookback_days=lookback_days,
+        )
+        summaries = [CompletedJobSummary.from_job_record(record) for record in records]
+        return CompletedJobsResponse(jobs=summaries, limit=limit, lookback_days=lookback_days)
 
     @router.get("/health", status_code=status.HTTP_200_OK)
     async def health(
@@ -292,16 +314,58 @@ def create_public_router() -> APIRouter:
     ) -> CallbackResponse:
         received_at = datetime.now(timezone.utc)
         provided_secret = request.headers.get(CALLBACK_SECRET_HEADER)
+        client_host = request.client.host if request.client else None
 
-        response_status, message = await callback_service.process_callback(
-            job_service=job_service,
-            job_id=job_id,
-            status=status,
-            completed_at=completed_at,
-            error=error,
-            provided_secret=provided_secret,
-            image=image,
-            received_at=received_at,
+        logger.info(
+            "results_callback.request_received job_id=%s status=%s completed_at=%s has_image=%s filename=%s content_type=%s secret_provided=%s client=%s",
+            job_id,
+            status,
+            completed_at,
+            image is not None,
+            image.filename if image else None,
+            image.content_type if image else None,
+            bool(provided_secret),
+            client_host,
+        )
+
+        try:
+            response_status, message = await callback_service.process_callback(
+                job_service=job_service,
+                job_id=job_id,
+                status=status,
+                completed_at=completed_at,
+                error=error,
+                provided_secret=provided_secret,
+                image=image,
+                received_at=received_at,
+            )
+        except HTTPException as http_exc:
+            cause = getattr(http_exc, "__cause__", None)
+            cause_type = type(cause).__name__ if cause else None
+            cause_message = str(cause) if cause else None
+            logger.warning(
+                "results_callback.http_error job_id=%s status=%s code=%s detail=%s cause_type=%s cause_message=%s",
+                job_id,
+                status,
+                http_exc.status_code,
+                http_exc.detail,
+                cause_type,
+                cause_message,
+            )
+            raise
+        except Exception:
+            logger.exception(
+                "results_callback.unexpected_error job_id=%s status=%s",
+                job_id,
+                status,
+            )
+            raise
+
+        logger.info(
+            "results_callback.processed job_id=%s request_status=%s response_status=%s",
+            job_id,
+            status,
+            response_status,
         )
 
         return CallbackResponse(status=response_status, message=message)

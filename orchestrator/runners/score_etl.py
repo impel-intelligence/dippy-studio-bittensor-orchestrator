@@ -90,7 +90,6 @@ class ScoreETLRunner:
                 jobs_fetched=payload.get("jobs_fetched"),
                 job_statuses=payload.get("job_statuses"),
                 score=payload.get("score"),
-                slashed=payload.get("slashed"),
                 considered=payload.get("considered"),
             )
 

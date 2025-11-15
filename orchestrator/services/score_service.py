@@ -17,16 +17,17 @@ except ImportError:
 
     ConfigDict = None  # type: ignore
 
+from orchestrator.clients.database import PostgresClient
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient
-from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient, Miner
 from orchestrator.common.model_utils import dump_model, validate_model
+from orchestrator.domain.miner import Miner
 from orchestrator.schemas.scores import ScorePayload, ScoreValue, ScoresResponse
-from orchestrator.services.database_service import DatabaseService
 from orchestrator.services.job_scoring import job_to_score
+from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 
 if TYPE_CHECKING:
+    from orchestrator.clients.subnet_state_client import SubnetStateClient
     from orchestrator.services.job_service import JobService
-    from orchestrator.services.subnet_state_service import SubnetStateService
 
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 class ScoreRecord(BaseModel):
     scores: float
-    is_slashed: bool
+    failure_count: int = 0
 
     if ConfigDict is not None:  # type: ignore[truthy-bool]
         model_config = ConfigDict(extra="allow")  # type: ignore[assignment]
@@ -64,7 +65,7 @@ class ScoreRepository:
         "last_updated_at",
     )
 
-    def __init__(self, database_service: DatabaseService) -> None:
+    def __init__(self, database_service: PostgresClient) -> None:
         self._database_service = database_service
         self._ensure_schema()
         self._last_update: Optional[datetime] = None
@@ -177,13 +178,19 @@ class ScoreRepository:
 
         if "scores" not in data:
             raise ValueError("score payload must include a 'scores' field")
-        if "is_slashed" not in data:
-            raise ValueError("score payload must include an 'is_slashed' field")
+
+        failure_raw = data.get("failure_count", 0)
+        try:
+            failure_count = int(failure_raw)
+        except (TypeError, ValueError):
+            failure_count = 0
+        if failure_count < 0:
+            failure_count = 0
 
         data = {
             **data,
             "scores": float(data["scores"]),
-            "is_slashed": bool(data["is_slashed"]),
+            "failure_count": failure_count,
         }
 
         return validate_model(ScoreRecord, data)
@@ -251,8 +258,8 @@ class ScoreEngine:
         repository: ScoreRepository,
         *,
         job_service: "JobService | None" = None,
-        subnet_state_service: "SubnetStateService | None" = None,
-        miner_metagraph_client: LiveMinerMetagraphClient | None = None,
+        subnet_state_service: "SubnetStateClient | None" = None,
+        miner_metagraph_service: MinerMetagraphService | None = None,
         netuid: int | None = None,
         network: str | None = None,
         fetch_concurrency: int = 8,
@@ -263,7 +270,7 @@ class ScoreEngine:
         self._repository = repository
         self._job_service = job_service
         self._subnet_state_service = subnet_state_service
-        self._miner_metagraph_client = miner_metagraph_client
+        self._miner_metagraph_service = miner_metagraph_service
         self._netuid = netuid
         self._network = network
         self._fetch_concurrency = max(1, int(fetch_concurrency)) if fetch_concurrency else 1
@@ -285,7 +292,7 @@ class ScoreEngine:
 
     def set_subnet_state_service(
         self,
-        subnet_state_service: "SubnetStateService | None",
+        subnet_state_service: "SubnetStateClient | None",
         *,
         netuid: int | None = None,
         network: str | None = None,
@@ -296,8 +303,8 @@ class ScoreEngine:
         if network is not None:
             self._network = network
 
-    def set_miner_metagraph_client(self, client: LiveMinerMetagraphClient | None) -> None:
-        self._miner_metagraph_client = client
+    def set_miner_metagraph_service(self, service: MinerMetagraphService | None) -> None:
+        self._miner_metagraph_service = service
 
     async def fetch_completed_jobs(
         self,
@@ -420,7 +427,7 @@ class ScoreEngine:
                 if isinstance(value, ScoreRecord):
                     prepared[hotkey] = value
                 else:
-                    prepared[hotkey] = ScoreRecord(scores=float(value), is_slashed=False)
+                    prepared[hotkey] = ScoreRecord(scores=float(value), failure_count=0)
             self._repository.put_many(prepared)
             return True
         except Exception as exc:  # pragma: no cover - persistence failure logging
@@ -503,22 +510,17 @@ class ScoreEngine:
             hotkeys=normalized_hotkeys,
         )
         for hotkey in normalized_hotkeys:
-            score_records.setdefault(hotkey, ScoreRecord(scores=0.0, is_slashed=False))
+            score_records.setdefault(
+                hotkey,
+                ScoreRecord(scores=0.0, failure_count=0),
+            )
             if hotkey in fetch_failures:
                 continue
             if completed_jobs.get(hotkey):
                 continue
 
-            current_record = score_records.get(hotkey)
-            is_slashed = False
-            if isinstance(current_record, ScoreRecord):
-                is_slashed = bool(current_record.is_slashed)
-            elif isinstance(current_record, Mapping):
-                is_slashed = bool(current_record.get("is_slashed"))
-
             reset_history = ScoreHistory(
                 settings=self._fresh_settings(),
-                is_slashed=is_slashed,
                 extra_fields={"hotkey": hotkey},
             )
             reset_history.apply_decay(reference_now)
@@ -541,15 +543,12 @@ class ScoreEngine:
                 )
                 if record is not None:
                     payload["score"] = record_score
-                    payload["slashed"] = bool(record.is_slashed)
                 else:
                     payload.setdefault("score", None)
-                    payload.setdefault("slashed", None)
                 logger.info(
-                    "score_engine.trace.scores hotkey=%s score=%s slashed=%s",
+                    "score_engine.trace.scores hotkey=%s score=%s",
                     hotkey,
                     record_score,
-                    getattr(record, "is_slashed", None) if record else None,
                 )
 
         zeroed_hotkeys = sum(1 for record in score_records.values() if float(record.scores) <= 0.0)
@@ -627,8 +626,8 @@ class ScoreEngine:
         return normalized
 
     async def _resolve_hotkeys(self) -> list[str]:
-        if self._miner_metagraph_client is not None:
-            state = self._miner_metagraph_client.fetch_miners()
+        if self._miner_metagraph_service is not None:
+            state = self._miner_metagraph_service.fetch_miners()
             if state:
                 return list(state.keys())
 
@@ -670,11 +669,11 @@ class ScoreService:
 
     def __init__(
         self,
-        database_service: DatabaseService,
+        database_service: PostgresClient,
         *,
         job_service: "JobService | None" = None,
-        subnet_state_service: "SubnetStateService | None" = None,
-        miner_metagraph_client: LiveMinerMetagraphClient | None = None,
+        subnet_state_service: "SubnetStateClient | None" = None,
+        miner_metagraph_service: MinerMetagraphService | None = None,
         netuid: int | None = None,
         network: str | None = None,
         fetch_concurrency: int = 8,
@@ -704,7 +703,7 @@ class ScoreService:
             repository=self._repository,
             job_service=job_service,
             subnet_state_service=subnet_state_service,
-            miner_metagraph_client=miner_metagraph_client,
+            miner_metagraph_service=miner_metagraph_service,
             netuid=netuid,
             network=network,
             fetch_concurrency=fetch_concurrency,
@@ -749,7 +748,7 @@ class ScoreService:
 
     def set_subnet_state_service(
         self,
-        subnet_state_service: "SubnetStateService | None",
+        subnet_state_service: "SubnetStateClient | None",
         *,
         netuid: int | None = None,
         network: str | None = None,
@@ -760,8 +759,8 @@ class ScoreService:
             network=network,
         )
 
-    def set_miner_metagraph_client(self, client: LiveMinerMetagraphClient | None) -> None:
-        self._engine.set_miner_metagraph_client(client)
+    def set_miner_metagraph_service(self, service: MinerMetagraphService | None) -> None:
+        self._engine.set_miner_metagraph_service(service)
 
     async def fetch_completed_jobs(
         self,
@@ -845,7 +844,6 @@ class ScoreHistory:
     sample_count: int = 0
     last_success_at: datetime | None = None
     last_ema_update_at: datetime | None = None
-    is_slashed: bool = False
     extra_fields: dict[str, Any] = field(default_factory=dict)
 
     def apply_decay(self, reference_time: datetime) -> None:
@@ -907,11 +905,10 @@ class ScoreHistory:
                 self.extra_fields['last_job_id'] = job_id
 
     def to_payload(self) -> dict[str, Any]:
-        payload = {**self.extra_fields}
+        payload = {key: value for key, value in self.extra_fields.items() if key != 'is_slashed'}
         payload.update(
             {
                 'scores': float(self.scores),
-                'is_slashed': bool(self.is_slashed),
                 'ema_score': float(self.ema_score),
                 'legacy_score': float(self.legacy_score),
                 'success_count': int(self.success_count),
@@ -956,7 +953,6 @@ class ScoreHistory:
         last_ema_update_at = cls._parse_datetime(
             payload.get('ema_last_update_at') or payload.get('last_score_update_at')
         )
-        is_slashed = bool(payload.get('is_slashed', False))
 
         managed_keys = {
             'scores',
@@ -987,7 +983,6 @@ class ScoreHistory:
             sample_count=sample_count,
             last_success_at=last_success_at,
             last_ema_update_at=last_ema_update_at,
-            is_slashed=is_slashed,
             extra_fields=extras,
         )
 
@@ -1207,6 +1202,8 @@ async def build_scores_from_state(
 
     async def _score_hotkey(hotkey: str, miner: Miner) -> tuple[str, ScorePayload, dict[str, Any]]:
         async with semaphore:
+            failed_audits = int(getattr(miner, "failed_audits", 0) or 0)
+            status_value = "SLASHED" if failed_audits else "COMPLETED"
             try:
                 jobs = await job_relay_client.list_jobs_for_hotkey(hotkey, since=cutoff)
             except Exception as exc:  # pragma: no cover - defensive network logging
@@ -1216,7 +1213,7 @@ async def build_scores_from_state(
                     exc_info=exc,
                 )
                 payload = ScorePayload(
-                    status="COMPLETED",
+                    status=status_value,
                     score=ScoreValue(total_score=0.0),
                 )
                 return hotkey, payload, {
@@ -1225,6 +1222,7 @@ async def build_scores_from_state(
                     "failures": 0,
                     "fetch_failed": True,
                     "miner_valid": bool(getattr(miner, "valid", False)),
+                    "failed_audits": failed_audits,
                 }
 
             filtered_jobs = [
@@ -1241,7 +1239,7 @@ async def build_scores_from_state(
             )
 
             payload = ScorePayload(
-                status="COMPLETED",
+                status=status_value,
                 score=ScoreValue(total_score=float(history.scores)),
             )
             return hotkey, payload, {
@@ -1251,6 +1249,7 @@ async def build_scores_from_state(
                 "fetch_failed": False,
                 "miner_valid": bool(getattr(miner, "valid", False)),
                 "ema_score": history.ema_score,
+                "failed_audits": failed_audits,
             }
 
     if not state:

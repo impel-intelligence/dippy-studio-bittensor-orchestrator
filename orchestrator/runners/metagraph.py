@@ -5,9 +5,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional, Tuple
 
-from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient, Miner
+from orchestrator.domain.miner import Miner
 from orchestrator.common.model_utils import dump_model
 from orchestrator.common.structured_logging import StructuredLogger
+from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 
 
 StateResult = Tuple[dict[str, Miner], Optional[int]]
@@ -19,7 +20,7 @@ class MetagraphStateRunner:
     def __init__(
         self,
         *,
-        miner_metagraph_client: LiveMinerMetagraphClient,
+        miner_metagraph_client: MinerMetagraphService,
         netuid: int,
         network: str,
         subnet_fetcher: Callable[[int, str], Optional[StateResult]],

@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from orchestrator.services.callback_service import CallbackService
-from orchestrator.services.callback_uploader import BaseUploader
+from orchestrator.clients.storage import BaseUploader
 
 
 class _FakeUploadFile:

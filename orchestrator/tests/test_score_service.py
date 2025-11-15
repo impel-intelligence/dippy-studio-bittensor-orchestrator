@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient
-from orchestrator.clients.miner_metagraph import Miner
+from orchestrator.domain.miner import Miner
 from orchestrator.services.score_service import build_scores_from_state
 
 

@@ -42,6 +42,10 @@ def _job(job_type: JobType, payload: dict[str, object] | None = None) -> SimpleN
     )
 
 
+def _miner(address: str) -> SimpleNamespace:
+    return SimpleNamespace(network_address=address)
+
+
 def test_build_dispatch_payload_includes_flux_dev_overrides() -> None:
     engine = _make_engine()
     job = _job(JobType.FLUX_DEV)
@@ -76,3 +80,30 @@ def test_existing_fields_are_not_overwritten() -> None:
 
     assert payload["flux_mode"] == "custom"
     assert payload["task_type"] == "custom-type"
+
+
+def test_resolve_inference_url_defaults_to_inference_endpoint() -> None:
+    engine = _make_engine()
+    miner = _miner("https://miner.example/api")
+
+    url = engine._resolve_inference_url(miner, JobType.FLUX_DEV)
+
+    assert url == "https://miner.example/api/inference"
+
+
+def test_resolve_inference_url_uses_edit_endpoint_for_kontext_jobs() -> None:
+    engine = _make_engine()
+    miner = _miner("https://miner.example/api")
+
+    url = engine._resolve_inference_url(miner, JobType.FLUX_KONTEXT)
+
+    assert url == "https://miner.example/api/edit"
+
+
+def test_resolve_inference_url_preserves_existing_edit_endpoint() -> None:
+    engine = _make_engine()
+    miner = _miner("https://miner.example/api/edit/")
+
+    url = engine._resolve_inference_url(miner, JobType.FLUX_KONTEXT)
+
+    assert url == "https://miner.example/api/edit"

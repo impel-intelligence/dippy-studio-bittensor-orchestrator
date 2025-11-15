@@ -9,15 +9,16 @@ from epistula.epistula import load_keypair_from_env
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient, Miner
+from orchestrator.domain.miner import Miner
 from orchestrator.common.job_store import Job, JobStatus, JobType
 from orchestrator.dependencies import (
     get_job_service,
-    get_miner_metagraph_client,
+    get_miner_metagraph_service,
     get_score_service,
 )
 from orchestrator.schemas.job import JobRecord
 from orchestrator.services.job_service import JobService
+from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.services.score_service import ScoreRecord, ScoreService
 
 
@@ -72,7 +73,7 @@ class MinerUpsertRequest(BaseModel):
     network_address: str = "http://localhost"
     valid: bool = False
     alpha_stake: int = 0
-    capacity: Dict[str, Any] = Field(default_factory=dict)
+    capacity: Dict[str, bool] = Field(default_factory=dict)
     failed_audits: int = Field(default=0, ge=0)
 
     def to_miner(self, *, hotkey_override: str | None = None) -> Miner:
@@ -91,6 +92,12 @@ class MinerListResponse(BaseModel):
 class MinerDeleteResponse(BaseModel):
     status: str
     hotkey: str
+
+
+class MinerCapacityResponse(BaseModel):
+    capacities: Dict[str, Dict[str, bool]]
+    block: int | None = None
+    last_updated: Optional[str] = None
 
 
 def create_internal_router() -> APIRouter:
@@ -118,7 +125,7 @@ def create_internal_router() -> APIRouter:
     @router.get("/stats", response_model=StatsResponse, status_code=status.HTTP_200_OK)
     async def stats(
         job_service: JobService = Depends(get_job_service),
-        metagraph: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+        metagraph: MinerMetagraphService = Depends(get_miner_metagraph_service),
     ) -> StatsResponse:
         keypair = load_keypair_from_env()
         epistula_ss58 = getattr(keypair, "ss58_address", None) if keypair else None
@@ -178,7 +185,7 @@ def create_internal_router() -> APIRouter:
         status_code=status.HTTP_200_OK,
     )
     async def dump_metagraph_state(
-        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+        client: MinerMetagraphService = Depends(get_miner_metagraph_service),
     ) -> MetagraphDumpResponse:
         last_update_dt = client.last_update()
         last_updated = last_update_dt.isoformat() if last_update_dt else None
@@ -201,7 +208,7 @@ def create_internal_router() -> APIRouter:
         status_code=status.HTTP_200_OK,
     )
     async def dump_full_metagraph_state(
-        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+        client: MinerMetagraphService = Depends(get_miner_metagraph_service),
     ) -> MetagraphDumpResponse:
         last_update_dt = client.last_update()
         last_updated = last_update_dt.isoformat() if last_update_dt else None
@@ -220,9 +227,28 @@ def create_internal_router() -> APIRouter:
 
     @router.get("/miners", response_model=MinerListResponse, status_code=status.HTTP_200_OK)
     async def list_miners(
-        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+        client: MinerMetagraphService = Depends(get_miner_metagraph_service),
     ) -> MinerListResponse:
         return MinerListResponse(miners=client.dump_full_state())
+
+    @router.get(
+        "/miners/capacity",
+        response_model=MinerCapacityResponse,
+        status_code=status.HTTP_200_OK,
+    )
+    async def list_miner_capacities(
+        client: MinerMetagraphService = Depends(get_miner_metagraph_service),
+    ) -> MinerCapacityResponse:
+        state = client.dump_full_state()
+        capacities: Dict[str, Dict[str, bool]] = {
+            hotkey: dict(getattr(miner, "capacity", {}) or {}) for hotkey, miner in state.items()
+        }
+        last_update_dt = client.last_update()
+        return MinerCapacityResponse(
+            capacities=capacities,
+            block=client.last_block(),
+            last_updated=last_update_dt.isoformat() if last_update_dt else None,
+        )
 
     @router.get(
         "/miners/{hotkey}",
@@ -231,7 +257,7 @@ def create_internal_router() -> APIRouter:
     )
     async def get_miner_record(
         hotkey: str,
-        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+        client: MinerMetagraphService = Depends(get_miner_metagraph_service),
     ) -> Miner:
         miner = client.get_miner(hotkey)
         if miner is None:
@@ -245,7 +271,7 @@ def create_internal_router() -> APIRouter:
     )
     async def create_miner_record(
         request: MinerUpsertRequest,
-        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+        client: MinerMetagraphService = Depends(get_miner_metagraph_service),
     ) -> Miner:
         try:
             miner = client.upsert_miner(request.to_miner())
@@ -261,7 +287,7 @@ def create_internal_router() -> APIRouter:
     async def update_miner_record(
         hotkey: str,
         request: MinerUpsertRequest,
-        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+        client: MinerMetagraphService = Depends(get_miner_metagraph_service),
     ) -> Miner:
         try:
             miner = client.upsert_miner(request.to_miner(hotkey_override=hotkey))
@@ -276,7 +302,7 @@ def create_internal_router() -> APIRouter:
     )
     async def delete_miner_record(
         hotkey: str,
-        client: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+        client: MinerMetagraphService = Depends(get_miner_metagraph_service),
     ) -> MinerDeleteResponse:
         if not client.delete_miner(hotkey):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Miner not found")
@@ -286,7 +312,7 @@ def create_internal_router() -> APIRouter:
         *,
         job_service: JobService,
         score_service: ScoreService,
-        metagraph: LiveMinerMetagraphClient,
+        metagraph: MinerMetagraphService,
     ) -> Dict[str, RawDumpEntry]:
         try:
             job_records = await job_service.job_relay.list_jobs()
@@ -338,7 +364,10 @@ def create_internal_router() -> APIRouter:
             completed_jobs_count = sum(
                 1 for job in jobs if ScoreService._is_completed_job(job)  # noqa: SLF001
             )
-            score_record = fresh_scores.get(hotkey) or ScoreRecord(scores=0.0, is_slashed=False)
+            score_record = fresh_scores.get(hotkey) or ScoreRecord(
+                scores=0.0,
+                failure_count=0,
+            )
             snapshot[hotkey] = RawDumpEntry(
                 all_jobs_count=len(jobs),
                 completed_jobs_count=completed_jobs_count,
@@ -380,7 +409,7 @@ def create_internal_router() -> APIRouter:
     async def raw_dump(
         score_service: ScoreService = Depends(get_score_service),
         job_service: JobService = Depends(get_job_service),
-        metagraph: LiveMinerMetagraphClient = Depends(get_miner_metagraph_client),
+        metagraph: MinerMetagraphService = Depends(get_miner_metagraph_service),
     ) -> Dict[str, RawDumpEntry]:
         return await _collect_and_persist_scores(
             job_service=job_service,

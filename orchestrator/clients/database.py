@@ -8,7 +8,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg_pool import ConnectionPool
 
 
-class DatabaseService:
+class PostgresClient:
     """Lightweight wrapper around a psycopg connection pool."""
 
     def __init__(
@@ -20,7 +20,7 @@ class DatabaseService:
         kwargs: Optional[dict[str, object]] = None,
     ) -> None:
         if not dsn:
-            raise ValueError("DatabaseService requires a PostgreSQL DSN")
+            raise ValueError("PostgresClient requires a PostgreSQL DSN")
 
         pool_kwargs = {"autocommit": True}
         if kwargs:
@@ -73,3 +73,6 @@ class DatabaseService:
         except Exception:
             # Allow double close in teardown paths without raising.
             pass
+
+
+__all__ = ["PostgresClient"]

@@ -7,8 +7,10 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 
-from orchestrator.clients.jobrelay_client import BaseJobRelayClient, JobRelayHttpClient, JobRelaySettings
-from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient
+from orchestrator.clients.database import PostgresClient
+from orchestrator.clients.jobrelay_client import JobRelayHttpClient, JobRelaySettings
+from orchestrator.clients.storage import BaseUploader, GCSUploader
+from orchestrator.clients.subnet_state_client import SubnetStateClient
 from orchestrator.common.epistula_client import EpistulaClient
 from orchestrator.common.server_context import ServerContext
 from orchestrator.config import OrchestratorConfig, load_config
@@ -16,11 +18,12 @@ from orchestrator.dependencies import set_dependencies
 from orchestrator.routes import create_internal_router, create_public_router
 from orchestrator.services.audit_service import AuditService
 from orchestrator.services.callback_service import CallbackService
-from orchestrator.services.callback_uploader import BaseUploader, GCSUploader
-from orchestrator.services.database_service import DatabaseService
 from orchestrator.services.job_service import JobService
+from orchestrator.services.miner_health_service import MinerHealthService
+from orchestrator.services.miner_metagraph_service import MinerMetagraphService
+from orchestrator.services.miner_selection_service import MinerSelectionService
+from orchestrator.repositories import MinerRepository
 from orchestrator.services.score_service import ScoreService
-from orchestrator.services.subnet_state_service import SubnetStateService
 
 __all__ = ["orchestrator"]
 
@@ -54,20 +57,29 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
         max_conn = max(min_conn, self.config.database.max_connections)
 
         self.config.database.url = resolved_db_url
-        self.database_service = DatabaseService(
+        self.database_service = PostgresClient(
             dsn=resolved_db_url,
             min_connections=min_conn,
             max_connections=max_conn,
         )
 
         self.epistula_client = EpistulaClient()
-        self.miner_metagraph_client = LiveMinerMetagraphClient(
+        self.miner_repository = MinerRepository(self.database_service)
+        self.miner_health_service = MinerHealthService(
+            repository=self.miner_repository,
+            epistula_client=self.epistula_client,
+        )
+        self.miner_selection_service = MinerSelectionService(self.miner_repository)
+        self.miner_metagraph_service = MinerMetagraphService(
             database_service=self.database_service,
-            epistula_client=self.epistula_client
+            epistula_client=self.epistula_client,
+            repository=self.miner_repository,
+            health_service=self.miner_health_service,
+            selection_service=self.miner_selection_service,
         )
         self.netuid = self.config.subnet.netuid
         self.network = self.config.subnet.network
-        self.subnet_state_service = SubnetStateService(network=self.network)
+        self.subnet_state_service = SubnetStateClient(network=self.network)
 
         self.server_context = ServerContext.default(service_name="orchestrator")
 
@@ -82,15 +94,26 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
                 )
             except Exception as exc:  # noqa: BLE001
                 self.server_context.logger.warning(
-                    "callback.gcs_uploader_init_failed bucket=%s -- using noop uploader: %s",
-                    callback_cfg.gcs.bucket,
-                    exc,
+                    "callback.gcs_uploader_init_failed",
+                    bucket=callback_cfg.gcs.bucket,
+                    error=str(exc),
                 )
                 uploader = BaseUploader()
         else:
             uploader = BaseUploader()
 
         self.callback_uploader = uploader
+        uploader_type = type(self.callback_uploader).__name__
+        uploader_bucket = getattr(self.callback_uploader, "bucket", None)
+        uploader_prefix = getattr(self.callback_uploader, "prefix", None)
+        uploader_creds = getattr(self.callback_uploader, "credentials_path", None)
+        self.server_context.logger.info(
+            "callback.uploader_selected",
+            uploader_type=uploader_type,
+            bucket=uploader_bucket,
+            prefix=uploader_prefix,
+            credentials=str(uploader_creds) if uploader_creds is not None else None,
+        )
         self.callback_service = CallbackService(uploader=self.callback_uploader)
 
         jobrelay_cfg = self.config.jobrelay
@@ -109,9 +132,9 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             self.job_relay_client = JobRelayHttpClient(jobrelay_settings)
         except Exception as exc:  # noqa: BLE001
             self.server_context.logger.error(
-                "jobrelay.client_init_failed url=%s error=%s",
-                jobrelay_cfg.base_url,
-                exc,
+                "jobrelay.client_init_failed",
+                url=jobrelay_cfg.base_url,
+                error=str(exc),
             )
             raise
 
@@ -122,7 +145,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             subnet_state_service=self.subnet_state_service,
             netuid=self.netuid,
             network=self.network,
-            miner_metagraph_client=self.miner_metagraph_client,
+            miner_metagraph_service=self.miner_metagraph_service,
             ema_alpha=self.config.scores.ema_alpha,
             ema_half_life_seconds=self.config.scores.ema_half_life_seconds,
             failure_penalty_weight=self.config.scores.failure_penalty_weight,
@@ -132,7 +155,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
 
         self.audit_service = AuditService(
             job_service=self.job_service,
-            miner_metagraph_client=self.miner_metagraph_client,
+            miner_metagraph_service=self.miner_metagraph_service,
             audit_sample_size=self.config.audit_sample_size,
             logger=self.server_context.logger,
         )
@@ -142,7 +165,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
 
     def _setup_dependencies_and_routes(self) -> None:  # noqa: D401 – helper method
         set_dependencies(
-            miner_metagraph_client=self.miner_metagraph_client,
+            miner_metagraph_service=self.miner_metagraph_service,
             database_service=self.database_service,
             server_context=self.server_context,
             callback_service=self.callback_service,

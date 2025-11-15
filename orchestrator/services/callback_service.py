@@ -11,7 +11,7 @@ import httpx
 from fastapi import HTTPException, UploadFile, status
 
 from orchestrator.common.job_store import JobStatus
-from orchestrator.services.callback_uploader import BaseUploader
+from orchestrator.clients.storage import BaseUploader
 from orchestrator.services.job_service import JobService
 
 
@@ -38,7 +38,11 @@ class CallbackService:
     ) -> Tuple[str, str]:
         received_at = received_at or datetime.now(timezone.utc)
         job_uuid = self._parse_job_uuid(job_id)
-        job = await job_service.get_job(job_uuid)
+        try:
+            job = await job_service.get_job(job_uuid)
+        except Exception:
+            logger.exception("callback.job_fetch_failed job_id=%s", job_id)
+            raise
 
         await self._verify_secret(job, provided_secret, job_service, job_uuid)
 
@@ -81,6 +85,14 @@ class CallbackService:
         )
 
         updated_job = await job_service.update_job(job_uuid, result_payload)
+        latency_snapshot = {k: v for k, v in latencies.items() if v is not None}
+        logger.info(
+            "callback.job_updated job_id=%s status=%s has_image=%s latencies=%s",
+            job_id,
+            status,
+            bool(image_info.get("image_uri")),
+            latency_snapshot or None,
+        )
         await self._audit(job_service, updated_job, job_uuid)
 
         response_status = await self._finalize_status(
@@ -103,6 +115,11 @@ class CallbackService:
 
         image_bytes = await image.read()
         if not image_bytes:
+            logger.warning(
+                "callback.image_payload_empty job_id=%s filename=%s",
+                job_uuid,
+                image.filename if image else None,
+            )
             await job_service.mark_job_failure(job_uuid, "empty_image_payload")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -143,6 +160,15 @@ class CallbackService:
         if image_bytes is None:
             return {}
 
+        uploader_name = type(self._uploader).__name__
+        logger.info(
+            "callback.image_upload_attempt job_id=%s filename=%s content_type=%s bytes=%s uploader=%s",
+            job_id,
+            image_filename,
+            image_content_type,
+            len(image_bytes),
+            uploader_name,
+        )
         try:
             image_uri = self._uploader.upload_bytes(
                 job_id=job_id,
@@ -152,9 +178,11 @@ class CallbackService:
             )
         except Exception as exc:  # noqa: BLE001 - uploader failure guard
             logger.exception(
-                "callback.image_upload_failed job_id=%s filename=%s",
+                "callback.image_upload_failed job_id=%s filename=%s uploader=%s error=%s",
                 job_id,
                 image_filename,
+                uploader_name,
+                exc,
             )
             await job_service.mark_job_failure(job_uuid, "callback_upload_failed")
             raise HTTPException(
@@ -300,6 +328,12 @@ class CallbackService:
     ) -> str:
         normalized_status = status.strip().lower()
         if normalized_status in {JobStatus.FAILED.value, "failed", "error"} or (error and error.strip()):
+            logger.warning(
+                "callback.finalize_status_failure job_id=%s status=%s error=%s",
+                job_uuid,
+                status,
+                error,
+            )
             await job_service.mark_job_failure(job_uuid, f"callback_status:{status}")
             return "error"
         return "success"
@@ -322,6 +356,7 @@ class CallbackService:
     ) -> None:
         expected_secret = getattr(job, "callback_secret", None)
         if not expected_secret:
+            logger.error("callback.secret_missing job_id=%s", job_uuid)
             await job_service.mark_job_failure(job_uuid, "callback_secret_missing")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -329,6 +364,11 @@ class CallbackService:
             )
 
         if provided_secret != expected_secret:
+            logger.warning(
+                "callback.secret_mismatch job_id=%s secret_provided=%s",
+                job_uuid,
+                bool(provided_secret),
+            )
             await job_service.mark_job_failure(job_uuid, "callback_secret_mismatch")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

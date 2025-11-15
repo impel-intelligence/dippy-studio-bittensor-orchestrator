@@ -3,7 +3,7 @@ services:
   orchestrator-dev:
     build:
       context: .
-      dockerfile: orchestrator.dev.Dockerfile
+      dockerfile: orchestrator/orchestrator.dev.Dockerfile
     command: python orchestrator/server.py --live-reload --port 42169
     ports:
       - "42169:42169"

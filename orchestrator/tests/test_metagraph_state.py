@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import uuid
 from datetime import datetime, timezone
@@ -9,9 +10,10 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 import pytest
 
-from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient, Miner
-from orchestrator.routes import create_internal_router, MinerUpsertRequest
-from orchestrator.services.database_service import DatabaseService
+from orchestrator.services.miner_metagraph_service import MinerMetagraphService
+from orchestrator.domain.miner import Miner
+from orchestrator.routes import create_internal_router, create_public_router, MinerUpsertRequest
+from orchestrator.clients.database import PostgresClient
 from orchestrator.services.score_service import ScoreRecord, ScoreService
 
 
@@ -70,10 +72,10 @@ def _drop_database(admin_conninfo: str, database_name: str) -> None:
 
 
 @pytest.fixture()
-def database_service() -> Iterator[DatabaseService]:
+def database_service() -> Iterator[PostgresClient]:
     base_dsn = _resolve_base_dsn()
     temp_conninfo, admin_conninfo, temp_db_name = _create_temp_database(base_dsn)
-    service = DatabaseService(temp_conninfo)
+    service = PostgresClient(temp_conninfo)
     try:
         yield service
     finally:
@@ -81,8 +83,8 @@ def database_service() -> Iterator[DatabaseService]:
         _drop_database(admin_conninfo, temp_db_name)
 
 
-def test_live_metagraph_client_tracks_sync_metadata(database_service: DatabaseService) -> None:
-    client = LiveMinerMetagraphClient(database_service)
+def test_live_metagraph_client_tracks_sync_metadata(database_service: PostgresClient) -> None:
+    client = MinerMetagraphService(database_service)
 
     assert client.last_update() is None
     assert client.last_block() is None
@@ -94,11 +96,15 @@ def test_live_metagraph_client_tracks_sync_metadata(database_service: DatabaseSe
     assert client.last_block() == 99
 
 
-def test_metagraph_state_endpoint_includes_metadata(database_service: DatabaseService) -> None:
-    client = LiveMinerMetagraphClient(database_service)
+def test_metagraph_state_endpoint_includes_metadata(database_service: PostgresClient) -> None:
+    client = MinerMetagraphService(database_service)
+    score_service = ScoreService(database_service)
+    state = _build_state()
+    hotkey = next(iter(state))
 
     fetched_at = datetime(2025, 2, 15, 8, 30, tzinfo=timezone.utc)
-    client.update_state(_build_state(), block=7, fetched_at=fetched_at)
+    client.update_state(state, block=7, fetched_at=fetched_at)
+    score_service.put(hotkey, ScoreRecord(scores=1.0, failure_count=4))
 
     router = create_internal_router()
     target_route = next(
@@ -114,10 +120,11 @@ def test_metagraph_state_endpoint_includes_metadata(database_service: DatabaseSe
     assert response.meta is not None
     assert response.meta["last_updated"] == fetched_at.isoformat()
     assert "***" in response.meta.get("db_path", "")
+    assert response.data[hotkey].failure_count == 4
 
 
-def test_miner_crud_helpers(database_service: DatabaseService) -> None:
-    client = LiveMinerMetagraphClient(database_service)
+def test_miner_crud_helpers(database_service: PostgresClient) -> None:
+    client = MinerMetagraphService(database_service)
 
     created = client.upsert_miner(
         Miner(
@@ -139,8 +146,9 @@ def test_miner_crud_helpers(database_service: DatabaseService) -> None:
     assert client.get_miner("hk-test") is None
 
 
-def test_internal_miner_routes_support_crud(database_service: DatabaseService) -> None:
-    client = LiveMinerMetagraphClient(database_service)
+def test_internal_miner_routes_support_crud(database_service: PostgresClient) -> None:
+    client = MinerMetagraphService(database_service)
+    score_service = ScoreService(database_service)
     router = create_internal_router()
 
     post_route = next(
@@ -155,12 +163,15 @@ def test_internal_miner_routes_support_crud(database_service: DatabaseService) -
         network_address="http://example",
         valid=True,
         alpha_stake=123,
-        capacity={"foo": "bar"},
+        capacity={"foo": True},
     )
 
     created = asyncio.run(post_route.endpoint(request=payload, client=client))
     assert created.hotkey == "hk-route"
-    assert created.capacity.get("foo") == "bar"
+    assert created.failure_count == 0
+    assert created.capacity.get("foo") is True
+
+    score_service.put("hk-route", ScoreRecord(scores=0.5, failure_count=6))
 
     list_route = next(
         route
@@ -169,6 +180,7 @@ def test_internal_miner_routes_support_crud(database_service: DatabaseService) -
     )
     listing = asyncio.run(list_route.endpoint(client=client))
     assert "hk-route" in listing.miners
+    assert listing.miners["hk-route"].failure_count == 6
 
     get_route = next(
         route
@@ -177,6 +189,7 @@ def test_internal_miner_routes_support_crud(database_service: DatabaseService) -
     )
     fetched = asyncio.run(get_route.endpoint(hotkey="hk-route", client=client))
     assert fetched.hotkey == "hk-route"
+    assert fetched.failure_count == 6
 
     put_route = next(
         route
@@ -188,13 +201,14 @@ def test_internal_miner_routes_support_crud(database_service: DatabaseService) -
         network_address="http://updated",
         valid=False,
         alpha_stake=999,
-        capacity={"baz": 1},
+        capacity={"baz": False},
     )
     updated = asyncio.run(
         put_route.endpoint(hotkey="hk-route", request=update_payload, client=client)
     )
     assert updated.alpha_stake == 999
     assert updated.valid is False
+    assert updated.failure_count == 6
 
     delete_route = next(
         route
@@ -207,12 +221,150 @@ def test_internal_miner_routes_support_crud(database_service: DatabaseService) -
     assert client.get_miner("hk-route") is None
 
 
-def test_scores_persist_alongside_miners(database_service: DatabaseService) -> None:
-    client = LiveMinerMetagraphClient(database_service)
+def test_internal_capacity_route_reports_capacities(database_service: PostgresClient) -> None:
+    client = MinerMetagraphService(database_service)
+    router = create_internal_router()
+    fetched_at = datetime(2025, 3, 5, 6, 7, tzinfo=timezone.utc)
+
+    client.update_state(
+        {
+            "hk-cap": Miner(
+                uid=5,
+                network_address="http://capacity.example",
+                valid=True,
+                alpha_stake=50,
+                capacity={"H100": True, "base-h100_pcie": True},
+                hotkey="hk-cap",
+            )
+        },
+        block=55,
+        fetched_at=fetched_at,
+    )
+
+    cap_route = next(
+        route
+        for route in router.routes
+        if route.path == "/_internal/miners/capacity" and "GET" in route.methods
+    )
+    response = asyncio.run(cap_route.endpoint(client=client))
+
+    assert response.block == 55
+    assert response.last_updated == fetched_at.isoformat()
+    assert response.capacities["hk-cap"]["base-h100_pcie"] is True
+    assert response.capacities["hk-cap"]["H100"] is True
+
+
+def test_fetch_candidate_filters_by_task_type(database_service: PostgresClient) -> None:
+    client = MinerMetagraphService(database_service)
+    client.update_state(
+        {
+            "hk-train-only": Miner(
+                uid=6,
+                network_address="http://train-only",
+                valid=True,
+                alpha_stake=25,
+                capacity={"base-h100_pcie": True},
+                hotkey="hk-train-only",
+            ),
+            "hk-match": Miner(
+                uid=7,
+                network_address="http://match",
+                valid=True,
+                alpha_stake=100,
+                capacity={"generate": True, "img-h100_pcie": True},
+                hotkey="hk-match",
+            ),
+        },
+        block=88,
+    )
+
+    selected = client.fetch_candidate(task_type="img-h100_pcie")
+    assert selected is not None
+    assert selected.hotkey == "hk-match"
+
+    assert client.fetch_candidate(task_type="non-existent-task") is None
+
+
+def test_fetch_candidate_requires_true_capacity(database_service: PostgresClient) -> None:
+    client = MinerMetagraphService(database_service)
+    client.update_state(
+        {
+            "hk-false": Miner(
+                uid=8,
+                network_address="http://nope",
+                valid=True,
+                alpha_stake=40,
+                capacity={"img-h100_pcie": False},
+                hotkey="hk-false",
+            )
+        },
+        block=91,
+    )
+
+    assert client.fetch_candidate(task_type="img-h100_pcie") is None
+
+
+class _StubEpistulaClient:
+    def __init__(self, responses: dict[str, tuple[int, str]]):
+        self._responses = responses
+
+    def get_signed_request_sync(
+        self,
+        *,
+        url: str,
+        miner_hotkey: str,
+        timeout: int,
+    ) -> tuple[int, str]:
+        return self._responses[miner_hotkey]
+
+
+def test_validate_state_normalizes_capacity_and_marks_invalid_on_parse_error(
+    database_service: PostgresClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = {
+        "hk-valid": (200, json.dumps({"base-h100_pcie": True, "img-h100_pcie": True})),
+        "hk-invalid": (200, "{not-json"),
+    }
+    epistula = _StubEpistulaClient(responses)
+    client = MinerMetagraphService(database_service, epistula_client=epistula)
+
+    def _fake_urlopen(*args, **kwargs):  # noqa: ANN001 - matches stdlib signature
+        return _StubResponse(status=200)
+
+    monkeypatch.setattr("orchestrator.services.miner_metagraph_service.urlopen", _fake_urlopen)
+
+    state = {
+        "hk-valid": Miner(
+            uid=1,
+            network_address="https://valid.example",
+            valid=True,
+            alpha_stake=10,
+            hotkey="hk-valid",
+        ),
+        "hk-invalid": Miner(
+            uid=2,
+            network_address="https://invalid.example",
+            valid=True,
+            alpha_stake=10,
+            hotkey="hk-invalid",
+        ),
+    }
+
+    validated = client.validate_state(state)
+
+    assert validated["hk-valid"].capacity == {"base-h100_pcie": True, "img-h100_pcie": True}
+    assert validated["hk-valid"].valid is True
+    assert validated["hk-invalid"].valid is False
+    assert validated["hk-invalid"].capacity == {}
+
+
+def test_scores_persist_alongside_miners(database_service: PostgresClient) -> None:
+    client = MinerMetagraphService(database_service)
     score_service = ScoreService(database_service)
     hotkey = "hk-score"
 
-    score_service.put(hotkey, ScoreRecord(scores=2.5, is_slashed=False))
+    score_service.put(hotkey, ScoreRecord(scores=2.5))
     initial = score_service.get(hotkey)
     assert initial is not None
     assert initial.scores == pytest.approx(2.5)
@@ -248,6 +400,68 @@ def test_scores_persist_alongside_miners(database_service: DatabaseService) -> N
     assert score_payload is not None
 
 
+def test_fetch_miners_exposes_failure_count(database_service: PostgresClient) -> None:
+    client = MinerMetagraphService(database_service)
+    score_service = ScoreService(database_service)
+    hotkey = "hk-penalty"
+
+    client.update_state(
+        {
+            hotkey: Miner(
+                uid=9,
+                network_address="http://penalty.example",
+                valid=True,
+                alpha_stake=50,
+                capacity={},
+                hotkey=hotkey,
+            )
+        }
+    )
+
+    score_service.put(
+        hotkey,
+        ScoreRecord(scores=1.0, failure_count=7),
+    )
+
+    miners = client.fetch_miners()
+    assert hotkey in miners
+    assert miners[hotkey].failure_count == 7
+
+
+def test_public_miner_status_includes_failure_count(database_service: PostgresClient) -> None:
+    client = MinerMetagraphService(database_service)
+    score_service = ScoreService(database_service)
+    hotkey = "hk-public"
+
+    client.update_state(
+        {
+            hotkey: Miner(
+                uid=11,
+                network_address="http://public.example",
+                valid=True,
+                alpha_stake=88,
+                capacity={},
+                hotkey=hotkey,
+            )
+        }
+    )
+
+    score_service.put(
+        hotkey,
+        ScoreRecord(scores=0.9, failure_count=3),
+    )
+
+    router = create_public_router()
+    miner_status_route = next(
+        route
+        for route in router.routes
+        if getattr(route, "path", None) == "/miner_status" and "GET" in route.methods
+    )
+
+    response = asyncio.run(miner_status_route.endpoint(client=client))
+    assert response.data[hotkey].failure_count == 3
+
+
 class _StubResponse:
     def __init__(self, status: int = 200) -> None:
         self.status = status
@@ -260,10 +474,10 @@ class _StubResponse:
 
 
 def test_validate_state_preserves_manually_invalidated_miners(
-    database_service: DatabaseService,
+    database_service: PostgresClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = LiveMinerMetagraphClient(database_service)
+    client = MinerMetagraphService(database_service)
     hotkey = "hk-audit-invalid"
     client.upsert_miner(
         Miner(
@@ -278,7 +492,7 @@ def test_validate_state_preserves_manually_invalidated_miners(
     def _fake_urlopen(*args, **kwargs):  # noqa: ANN001 - signature mirrors stdlib
         return _StubResponse(status=200)
 
-    monkeypatch.setattr("orchestrator.clients.miner_metagraph.urlopen", _fake_urlopen)
+    monkeypatch.setattr("orchestrator.services.miner_metagraph_service.urlopen", _fake_urlopen)
 
     new_state = {
         hotkey: Miner(
@@ -294,8 +508,8 @@ def test_validate_state_preserves_manually_invalidated_miners(
     assert validated[hotkey].valid is False
 
 
-def test_validate_state_preserves_manually_validated_miners(database_service: DatabaseService) -> None:
-    client = LiveMinerMetagraphClient(database_service)
+def test_validate_state_preserves_manually_validated_miners(database_service: PostgresClient) -> None:
+    client = MinerMetagraphService(database_service)
     hotkey = "hk-audit-valid"
     client.upsert_miner(
         Miner(

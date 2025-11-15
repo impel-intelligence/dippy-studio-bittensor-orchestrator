@@ -7,8 +7,9 @@ from typing import Any, Dict
 
 import pytest
 
-from orchestrator.clients.miner_metagraph import LiveMinerMetagraphClient, Miner
-from orchestrator.services.database_service import DatabaseService
+from orchestrator.services.miner_metagraph_service import MinerMetagraphService
+from orchestrator.domain.miner import Miner
+from orchestrator.clients.database import PostgresClient
 from orchestrator.services.job_scoring import job_to_score
 from orchestrator.services.score_service import ScoreRecord, ScoreService
 
@@ -19,12 +20,12 @@ INTEGRATION_DSN = os.getenv(
 )
 
 
-def _wipe_miners(service: DatabaseService) -> None:
+def _wipe_miners(service: PostgresClient) -> None:
     with service.cursor() as cur:
         cur.execute("DELETE FROM miners")
 
 
-def _decode_scores_payload(service: DatabaseService, hotkey: str) -> Dict[str, Any]:
+def _decode_scores_payload(service: PostgresClient, hotkey: str) -> Dict[str, Any]:
     with service.cursor() as cur:
         cur.execute("SELECT scores FROM miners WHERE hotkey = %s", (hotkey,))
         row = cur.fetchone()
@@ -38,8 +39,8 @@ def _decode_scores_payload(service: DatabaseService, hotkey: str) -> Dict[str, A
 
 
 @pytest.fixture(scope="module")
-def database_service() -> DatabaseService:
-    service = DatabaseService(INTEGRATION_DSN)
+def database_service() -> PostgresClient:
+    service = PostgresClient(INTEGRATION_DSN)
     try:
         yield service
     finally:
@@ -47,23 +48,23 @@ def database_service() -> DatabaseService:
 
 
 @pytest.fixture(autouse=True)
-def cleanup_miners(database_service: DatabaseService) -> None:
+def cleanup_miners(database_service: PostgresClient) -> None:
     _wipe_miners(database_service)
     yield
     _wipe_miners(database_service)
 
 
 @pytest.mark.integration
-def test_scores_survive_metagraph_updates(database_service: DatabaseService) -> None:
+def test_scores_survive_metagraph_updates(database_service: PostgresClient) -> None:
     score_service = ScoreService(database_service)
     hotkey = "hk-integration"
 
-    score_service.put(hotkey, ScoreRecord(scores=5.5, is_slashed=False))
+    score_service.put(hotkey, ScoreRecord(scores=5.5))
     stored = score_service.get(hotkey)
     assert stored is not None
     assert stored.scores == pytest.approx(5.5)
 
-    metagraph_client = LiveMinerMetagraphClient(database_service)
+    metagraph_client = MinerMetagraphService(database_service)
     metagraph_client.update_state(
         {
             hotkey: Miner(
@@ -83,11 +84,10 @@ def test_scores_survive_metagraph_updates(database_service: DatabaseService) -> 
 
     payload = _decode_scores_payload(database_service, hotkey)
     assert payload["scores"] == pytest.approx(5.5)
-    assert payload["is_slashed"] is False
 
 
 @pytest.mark.integration
-def test_jobs_to_score_persists_ema_fields(database_service: DatabaseService) -> None:
+def test_jobs_to_score_persists_ema_fields(database_service: PostgresClient) -> None:
     score_service = ScoreService(database_service)
     hotkey = "hk-ema"
     now = datetime.now(timezone.utc)
@@ -138,7 +138,7 @@ def test_jobs_to_score_persists_ema_fields(database_service: DatabaseService) ->
 
 
 @pytest.mark.integration
-def test_failure_penalty_with_existing_record(database_service: DatabaseService) -> None:
+def test_failure_penalty_with_existing_record(database_service: PostgresClient) -> None:
     score_service = ScoreService(database_service)
     hotkey = "hk-penalty"
     base_time = datetime.now(timezone.utc) - timedelta(minutes=2)
@@ -197,14 +197,13 @@ def test_failure_penalty_with_existing_record(database_service: DatabaseService)
 
 
 @pytest.mark.integration
-def test_last_update_recovers_from_persisted_state(database_service: DatabaseService) -> None:
+def test_last_update_recovers_from_persisted_state(database_service: PostgresClient) -> None:
     score_service = ScoreService(database_service)
     hotkey = "hk-last-update"
     event_time = datetime.now(timezone.utc)
 
     record = ScoreRecord(
         scores=1.0,
-        is_slashed=False,
         ema_last_update_at=event_time.isoformat(),
     )
     assert score_service.update_scores({hotkey: record})
