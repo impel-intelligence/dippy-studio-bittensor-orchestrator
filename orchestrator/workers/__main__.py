@@ -89,6 +89,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     trace_hotkeys = _normalize_hotkeys(args.trace_hotkeys)
 
     logger.info("runner.start targets=%s", ",".join(targets))
+    if "metagraph" in targets:
+        logger.info(
+            "runner.metagraph-once.start config=%s database_url=%s",
+            args.config_path or "<default>",
+            args.database_url or "<default>",
+        )
 
     try:
         run_targets(

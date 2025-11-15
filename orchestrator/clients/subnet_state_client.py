@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 BT_IMPORT_ERROR: Exception | None = None
 _BT_IMPORT_LOGGED = False
@@ -19,6 +19,7 @@ else:
 
 from orchestrator.domain.miner import Miner
 from orchestrator.runners.metagraph import StateResult
+from orchestrator.common.model_utils import dump_model
 
 logger = logging.getLogger(__name__)
 
@@ -79,19 +80,69 @@ class SubnetStateClient:
             base = f"{base}:{port}"
         return base
 
-    @staticmethod
-    def _extract_alpha_stake(metagraph: Any, index: int) -> int:
+    def _extract_alpha_stake(
+        self,
+        metagraph: Any,
+        index: int,
+        *,
+        hotkey: str | None,
+        netuid: int,
+        network: str,
+    ) -> int:
         alpha_source = getattr(metagraph, "alpha_stake", None)
         if alpha_source is None:
             alpha_source = getattr(metagraph, "stake", None)
+            if alpha_source is None:
+                logger.warning(
+                    "subnet.alpha_stake.source_missing netuid=%s network=%s hotkey=%s index=%s",
+                    netuid,
+                    network,
+                    hotkey,
+                    index,
+                )
+                return 0
 
-        if alpha_source is None or index >= len(alpha_source):
+        try:
+            source_length = len(alpha_source)
+        except Exception:
+            source_length = None
+
+        if source_length is not None and index >= source_length:
+            logger.warning(
+                "subnet.alpha_stake.index_out_of_range netuid=%s network=%s hotkey=%s index=%s length=%s",
+                netuid,
+                network,
+                hotkey,
+                index,
+                source_length,
+            )
             return 0
 
         try:
             value = alpha_source[index]
+        except Exception as exc:
+            logger.warning(
+                "subnet.alpha_stake.access_failed netuid=%s network=%s hotkey=%s index=%s error=%s",
+                netuid,
+                network,
+                hotkey,
+                index,
+                exc,
+            )
+            return 0
+
+        try:
             return int(max(0, float(value)))
-        except Exception:  # noqa: BLE001 - defensive casting
+        except Exception as exc:  # noqa: BLE001 - defensive casting
+            logger.warning(
+                "subnet.alpha_stake.parse_failed netuid=%s network=%s hotkey=%s index=%s raw_value=%s error=%s",
+                netuid,
+                network,
+                hotkey,
+                index,
+                value,
+                exc,
+            )
             return 0
 
     def _ensure_subtensor(self, network: str | None = None) -> Any | None:
@@ -203,13 +254,12 @@ class SubnetStateClient:
             network_address = self._format_network_address(registry)
             uid = uid_by_hotkey[hotkey_str]
             index = index_by_hotkey[hotkey_str]
-            alpha_stake = self._extract_alpha_stake(metagraph, index)
 
             state[hotkey_str] = Miner(
                 uid=uid,
                 network_address=network_address,
                 valid=False,
-                alpha_stake=alpha_stake,
+                alpha_stake=0,
                 hotkey=hotkey_str,
             )
 
@@ -224,6 +274,63 @@ class SubnetStateClient:
                 block = None
 
         return state, block
+
+    def populate_alpha_stake(
+        self,
+        miners: Mapping[str, Miner],
+        *,
+        netuid: int,
+        network: str,
+    ) -> dict[str, Miner]:
+        if not miners:
+            return {}
+
+        subtensor = self._ensure_subtensor(network)
+        if subtensor is None:
+            return dict(miners)
+
+        try:
+            metagraph = subtensor.metagraph(netuid=netuid)
+        except Exception as exc:  # noqa: BLE001 - external dependency guard
+            logger.warning(
+                "subnet.alpha_stake.metagraph_failed netuid=%s network=%s",
+                netuid,
+                network,
+                exc_info=exc,
+            )
+            return dict(miners)
+
+        index_by_hotkey = {
+            str(hotkey): idx for idx, hotkey in enumerate(metagraph.hotkeys)
+        }
+
+        updated: dict[str, Miner] = {str(key): value for key, value in miners.items()}
+        for hotkey, miner in updated.items():
+            index = index_by_hotkey.get(hotkey)
+            if index is None:
+                logger.warning(
+                    "subnet.alpha_stake.hotkey_missing netuid=%s network=%s hotkey=%s",
+                    netuid,
+                    network,
+                    hotkey,
+                )
+                continue
+
+            alpha_stake = self._extract_alpha_stake(
+                metagraph,
+                index,
+                hotkey=hotkey,
+                netuid=netuid,
+                network=network,
+            )
+            try:
+                miner.alpha_stake = alpha_stake
+            except Exception:
+                payload = dump_model(miner)
+                payload["alpha_stake"] = alpha_stake
+                updated[hotkey] = Miner(**payload)
+
+        return updated
 
 
 __all__ = ["SubnetStateClient"]

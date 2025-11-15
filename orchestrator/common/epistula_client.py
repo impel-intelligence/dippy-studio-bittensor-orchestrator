@@ -136,12 +136,12 @@ class EpistulaClient:
         body, headers = self.build_signed_request({}, miner_hotkey)
         
         def _send() -> Tuple[int, str]:
-            req = urllib_request.Request(url, headers=headers, method="GET")
+            req = urllib_request.Request(url, data=body, headers=headers, method="GET")
             with urllib_request.urlopen(req, timeout=timeout) as response:
                 status_code = getattr(response, "status", response.getcode())
                 response_text = response.read().decode("utf-8", errors="ignore")
                 return status_code, response_text
-        
+
         return await asyncio.to_thread(_send)
     
     def get_signed_request_sync(
@@ -166,7 +166,7 @@ class EpistulaClient:
         """
         body, headers = self.build_signed_request({}, miner_hotkey)
         
-        req = urllib_request.Request(url, headers=headers, method="GET")
+        req = urllib_request.Request(url, data=body, headers=headers, method="GET")
         with urllib_request.urlopen(req, timeout=timeout) as response:
             status_code = getattr(response, "status", response.getcode())
             response_text = response.read().decode("utf-8", errors="ignore")

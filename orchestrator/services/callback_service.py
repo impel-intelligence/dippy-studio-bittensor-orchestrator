@@ -93,7 +93,6 @@ class CallbackService:
             bool(image_info.get("image_uri")),
             latency_snapshot or None,
         )
-        await self._audit(job_service, updated_job, job_uuid)
 
         response_status = await self._finalize_status(
             job_service=job_service,
@@ -306,17 +305,6 @@ class CallbackService:
             "secret_provided": bool(provided_secret),
         }
         return payload
-
-    async def _audit(
-        self,
-        job_service: JobService,
-        updated_job: Any,
-        job_uuid: uuid.UUID,
-    ) -> None:
-        try:
-            await job_service.audit(updated_job)
-        except Exception:  # noqa: BLE001
-            logger.exception("audit.post_callback_evaluation_failed job_id=%s", job_uuid)
 
     async def _finalize_status(
         self,

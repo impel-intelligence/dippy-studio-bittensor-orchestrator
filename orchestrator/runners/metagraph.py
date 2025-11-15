@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
 
 from orchestrator.domain.miner import Miner
 from orchestrator.common.model_utils import dump_model
 from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
+
+if TYPE_CHECKING:
+    from orchestrator.clients.subnet_state_client import SubnetStateClient
 
 
 StateResult = Tuple[dict[str, Miner], Optional[int]]
@@ -24,12 +27,14 @@ class MetagraphStateRunner:
         netuid: int,
         network: str,
         subnet_fetcher: Callable[[int, str], Optional[StateResult]],
+        subnet_state_client: "SubnetStateClient | None" = None,
         logger: StructuredLogger | logging.Logger | None = None,
     ) -> None:
         self._miner_metagraph_client = miner_metagraph_client
         self._netuid = netuid
         self._network = network
         self._fetch_subnet_state = subnet_fetcher
+        self._subnet_state_client = subnet_state_client
         self._logger: StructuredLogger | logging.Logger = (
             logger if logger is not None else logging.getLogger(__name__)
         )
@@ -84,9 +89,22 @@ class MetagraphStateRunner:
             return
 
         try:
+            enriched_state = self._populate_alpha_stake(validated_state)
+        except Exception as exc:  # pragma: no cover - logging safeguard
+            self._log(
+                "warning",
+                "metagraph.sync.populate_alpha_failed",
+                block=block,
+                netuid=self._netuid,
+                network=self._network,
+                error=str(exc),
+            )
+            enriched_state = validated_state
+
+        try:
             fetched_at = datetime.now(timezone.utc)
             self._miner_metagraph_client.update_state(
-                validated_state,
+                enriched_state,
                 block=block,
                 fetched_at=fetched_at,
             )
@@ -114,6 +132,17 @@ class MetagraphStateRunner:
 
         if self._should_log_debug():
             self._log_debug_state(block=block)
+
+    def _populate_alpha_stake(self, state: Dict[str, Miner]) -> Dict[str, Miner]:
+        if not state:
+            return state
+        if self._subnet_state_client is None:
+            return state
+        return self._subnet_state_client.populate_alpha_stake(
+            state,
+            netuid=self._netuid,
+            network=self._network,
+        )
 
     def _should_log_debug(self) -> bool:
         logger = self._logger

@@ -26,6 +26,7 @@ async def _run_metagraph(orchestrator: Orchestrator) -> None:
         netuid=orchestrator.config.subnet.netuid,
         network=orchestrator.config.subnet.network,
         subnet_fetcher=orchestrator.subnet_state_service.fetch_state,
+        subnet_state_client=orchestrator.subnet_state_service,
         logger=orchestrator.server_context.logger,
     )
     await runner.run_once()

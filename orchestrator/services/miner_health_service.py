@@ -63,11 +63,26 @@ class MinerHealthService:
                 )
                 if capacity is not None:
                     value.capacity = capacity
+                    try:
+                        capacity_keys = ",".join(sorted(capacity.keys())) if isinstance(capacity, dict) else "<non-mapping>"
+                    except Exception:
+                        capacity_keys = "<unknown>"
+                    logger.info(
+                        "miner_health.capacity_fetch_ok url=%s hotkey=%s keys=%s",
+                        network_address,
+                        value.hotkey or "",
+                        capacity_keys,
+                    )
                 elif capacity_parse_error:
                     value.capacity = {}
 
             existing = persisted_state.get(key)
-            resolved_valid = existing.valid if isinstance(existing, Miner) else network_valid
+            if network_valid:
+                resolved_valid = True
+            elif isinstance(existing, Miner):
+                resolved_valid = existing.valid
+            else:
+                resolved_valid = False
             if capacity_parse_error:
                 resolved_valid = False
 
