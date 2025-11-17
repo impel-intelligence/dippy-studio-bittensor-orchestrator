@@ -5,7 +5,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient
+from orchestrator.common.job_store import JobType
 from orchestrator.domain.miner import Miner
+from orchestrator.services.job_scoring import job_to_weighted_score
 from orchestrator.services.score_service import build_scores_from_state
 
 
@@ -65,21 +67,21 @@ async def test_build_scores_from_state_aggregates_recent_inference_jobs() -> Non
         hotkey: [
             {
                 "job_id": "job-recent",
-                "job_type": "inference",
+                "job_type": JobType.FLUX_KONTEXT.value,
                 "status": "success",
                 "completed_at": recent_completion,
                 "execution_duration_ms": 1000,
             },
             {
                 "job_id": "job-old",
-                "job_type": "inference",
+                "job_type": JobType.FLUX_KONTEXT.value,
                 "status": "success",
                 "completed_at": old_completion,
                 "execution_duration_ms": 1000,
             },
             {
                 "job_id": "job-failed",
-                "job_type": "inference",
+                "job_type": JobType.FLUX_KONTEXT.value,
                 "status": "failed",
                 "completed_at": recent_completion,
                 "execution_duration_ms": 1000,
@@ -94,8 +96,11 @@ async def test_build_scores_from_state_aggregates_recent_inference_jobs() -> Non
 
     assert hotkey in response.scores
     payload = response.scores[hotkey]
-    # Recent success contributes, while the accompanying failure applies the penalty weight.
-    assert payload.score.total_score == pytest.approx(0.8, rel=1e-3)
+    recent_job = jobs_by_hotkey[hotkey][0]
+    assert payload.score.total_score == pytest.approx(
+        job_to_weighted_score(recent_job),
+        rel=1e-3,
+    )
     assert response.stats["jobs_considered"] == 2
     assert response.stats["jobs_scored"] == 1
     assert response.stats["fetch_failures"] == 0

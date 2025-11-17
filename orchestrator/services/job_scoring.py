@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Any, Mapping, Optional
 
 DEFAULT_MAX_LATENCY_MS = 60_000.0
+_JOB_TYPE_WEIGHTS: dict[str, float] = {
+    "img-h100_pcie": 0.6,
+    "base-h100_pcie": 0.4,
+}
 
 
 def job_to_score(job: Mapping[str, Any], *, max_latency_ms: float = DEFAULT_MAX_LATENCY_MS) -> float:
@@ -20,6 +24,29 @@ def job_to_score(job: Mapping[str, Any], *, max_latency_ms: float = DEFAULT_MAX_
 
     ratio = min(latency_ms / max_latency_ms, 1.0)
     return 1.0 - ratio
+
+
+def job_to_weighted_score(
+    job: Mapping[str, Any],
+    *,
+    max_latency_ms: float = DEFAULT_MAX_LATENCY_MS,
+) -> float:
+    """Apply job-type weighting to the latency-based score."""
+    weight = _job_type_weight(job.get("job_type"))
+    if weight <= 0.0:
+        return 0.0
+    base_score = job_to_score(job, max_latency_ms=max_latency_ms)
+    weighted = weight * base_score
+    if weighted <= 0.0:
+        return 0.0
+    if weighted >= 1.0:
+        return 1.0
+    return weighted
+
+
+def job_type_has_weight(job: Mapping[str, Any]) -> bool:
+    """Return True when the job's type carries a non-zero weight."""
+    return _job_type_weight(job.get("job_type")) > 0.0
 
 
 def _extract_latency_ms(job: Mapping[str, Any]) -> Optional[float]:
@@ -68,4 +95,25 @@ def _coerce_to_float(value: Any) -> Optional[float]:
     return None
 
 
-__all__ = ["job_to_score", "DEFAULT_MAX_LATENCY_MS"]
+def _normalize_job_type(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip().lower()
+    try:
+        return str(value).strip().lower()
+    except Exception:
+        return ""
+
+
+def _job_type_weight(raw_value: Any) -> float:
+    normalized = _normalize_job_type(raw_value)
+    return float(_JOB_TYPE_WEIGHTS.get(normalized, 0.0))
+
+
+__all__ = [
+    "job_to_score",
+    "job_to_weighted_score",
+    "job_type_has_weight",
+    "DEFAULT_MAX_LATENCY_MS",
+]

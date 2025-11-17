@@ -6,12 +6,14 @@ from typing import Any, Dict, Mapping
 import pytest
 
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient
+from orchestrator.common.job_store import JobType
 from orchestrator.services.score_service import (
     ScoreEngine,
     ScoreRecord,
     ScoreRunSummary,
     ScoreSettings,
 )
+from orchestrator.services.job_scoring import job_to_weighted_score, job_type_has_weight
 
 
 class InMemoryScoreRepository:
@@ -84,13 +86,15 @@ def _build_engine(repository: InMemoryScoreRepository, relay: MutableJobRelay) -
         job_service=StubJobService(relay),  # type: ignore[arg-type]
         fetch_concurrency=1,
         score_settings=settings,
+        score_fn=job_to_weighted_score,
+        job_filter=job_type_has_weight,
     )
 
 
 def _success_job(job_id: str) -> dict[str, Any]:
     return {
         "job_id": job_id,
-        "job_type": "inference",
+        "job_type": JobType.FLUX_KONTEXT.value,
         "status": "success",
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "metrics": {"latency_ms": 1_000},

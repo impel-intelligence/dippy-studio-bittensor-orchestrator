@@ -22,7 +22,7 @@ from orchestrator.clients.jobrelay_client import BaseJobRelayClient
 from orchestrator.common.model_utils import dump_model, validate_model
 from orchestrator.domain.miner import Miner
 from orchestrator.schemas.scores import ScorePayload, ScoreValue, ScoresResponse
-from orchestrator.services.job_scoring import job_to_score
+from orchestrator.services.job_scoring import job_to_weighted_score, job_type_has_weight
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 
 if TYPE_CHECKING:
@@ -264,7 +264,8 @@ class ScoreEngine:
         network: str | None = None,
         fetch_concurrency: int = 8,
         score_settings: "ScoreSettings | None" = None,
-        score_fn: Callable[[Mapping[str, Any]], float] = job_to_score,
+        score_fn: Callable[[Mapping[str, Any]], float] = job_to_weighted_score,
+        job_filter: Callable[[Mapping[str, Any]], bool] | None = None,
         lookback_days: float | int | None = 7,
     ) -> None:
         self._repository = repository
@@ -276,6 +277,7 @@ class ScoreEngine:
         self._fetch_concurrency = max(1, int(fetch_concurrency)) if fetch_concurrency else 1
         self._score_settings = (score_settings or ScoreSettings()).normalized()
         self._score_fn = score_fn
+        self._job_filter = job_filter
         self._lookback_days: float | None = None
         self._lookback_window: timedelta | None = None
         if lookback_days is not None:
@@ -379,7 +381,11 @@ class ScoreEngine:
             jobs, failed = result
             if failed:
                 failures.add(hotkey)
-            filtered = [job for job in jobs if self._is_completed_job(job)]
+            filtered = [
+                job
+                for job in jobs
+                if self._is_completed_job(job) and self._should_score_job(job)
+            ]
             if filtered or include_empty:
                 completed[hotkey] = filtered
 
@@ -590,8 +596,9 @@ class ScoreEngine:
         existing_record: Mapping[str, Any] | ScoreRecord | None,
         reference_time: datetime,
     ) -> "ScoreHistory":
+        scoped_jobs = tuple(job for job in jobs if self._should_score_job(job))
         history = ScoreHistory.from_jobs(
-            jobs,
+            scoped_jobs,
             existing_record=existing_record,
             score_fn=self._score_fn,
             settings=self._score_settings,
@@ -613,6 +620,15 @@ class ScoreEngine:
         if self._job_service is None:
             raise RuntimeError("ScoreEngine job service dependency has not been configured")
         return self._job_service
+
+    def _should_score_job(self, job: Mapping[str, Any]) -> bool:
+        if self._job_filter is None:
+            return True
+        try:
+            return bool(self._job_filter(job))
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug("score_engine.job_filter_failed", exc_info=exc)
+            return False
 
     def _normalize_hotkeys(self, hotkeys: Iterable[str]) -> list[str]:
         seen: set[str] = set()
@@ -680,7 +696,8 @@ class ScoreService:
         ema_alpha: float = 1.0,
         ema_half_life_seconds: float = 604_800.0,
         failure_penalty_weight: float = 0.2,
-        score_fn: Callable[[Mapping[str, Any]], float] = job_to_score,
+        score_fn: Callable[[Mapping[str, Any]], float] = job_to_weighted_score,
+        job_filter: Callable[[Mapping[str, Any]], bool] | None = job_type_has_weight,
         lookback_days: float | int | None = 7,
     ) -> None:
         settings = ScoreSettings(
@@ -709,6 +726,7 @@ class ScoreService:
             fetch_concurrency=fetch_concurrency,
             score_settings=settings,
             score_fn=score_fn,
+            job_filter=job_filter,
             lookback_days=self._lookback_days,
         )
 
@@ -1154,10 +1172,22 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     return None
 
 
-def _is_relevant_inference_job(job: Mapping[str, Any], cutoff: datetime) -> bool:
-    job_type = str(job.get("job_type") or "").lower()
-    if job_type != "inference":
-        return False
+def _is_relevant_inference_job(
+    job: Mapping[str, Any],
+    cutoff: datetime,
+    job_filter: Callable[[Mapping[str, Any]], bool] | None,
+) -> bool:
+    if job_filter is not None:
+        try:
+            if not job_filter(job):
+                return False
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug("scores.build_from_state.job_filter_failed", exc_info=exc)
+            return False
+    else:
+        job_type = str(job.get("job_type") or "").lower()
+        if job_type != "inference":
+            return False
 
     if job.get("is_audit_job") is True:
         return False
@@ -1179,7 +1209,8 @@ async def build_scores_from_state(
     job_relay_client: BaseJobRelayClient,
     source: str = "metagraph",
     lookback_window: timedelta | None = None,
-    score_fn: Callable[[Mapping[str, Any]], float] = job_to_score,
+    score_fn: Callable[[Mapping[str, Any]], float] = job_to_weighted_score,
+    job_filter: Callable[[Mapping[str, Any]], bool] | None = job_type_has_weight,
     fetch_concurrency: int = _HOTKEY_FETCH_CONCURRENCY,
     ema_alpha: float = 1.0,
     ema_half_life_seconds: float | None = None,
@@ -1226,7 +1257,7 @@ async def build_scores_from_state(
                 }
 
             filtered_jobs = [
-                job for job in jobs if _is_relevant_inference_job(job, cutoff)
+                job for job in jobs if _is_relevant_inference_job(job, cutoff, job_filter)
             ]
 
             history = ScoreHistory.from_jobs(

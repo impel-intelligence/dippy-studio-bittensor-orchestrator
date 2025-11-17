@@ -184,3 +184,12 @@ check-docker:
 # Run all checks
 check: check-env check-docker
 	@echo "\n=== All checks completed ==="
+
+# ═══════════════════════════════════════════════════════════════════════════
+# JOBRELAY UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Execute the JobRelay CLI helper inside Docker (pass args="completed ...")
+jobrelay-cli args="--help":
+	docker compose --file docker-compose-local.yml run --rm jobrelay \
+		python -m jobrelay.cli {{args}}

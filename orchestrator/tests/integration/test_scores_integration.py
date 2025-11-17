@@ -7,10 +7,10 @@ from typing import Any, Dict
 
 import pytest
 
+from orchestrator.common.job_store import JobType
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.domain.miner import Miner
 from orchestrator.clients.database import PostgresClient
-from orchestrator.services.job_scoring import job_to_score
 from orchestrator.services.score_service import ScoreRecord, ScoreService
 
 
@@ -95,7 +95,7 @@ def test_jobs_to_score_persists_ema_fields(database_service: PostgresClient) -> 
         {
             "job_id": "job-success",
             "status": "success",
-            "job_type": "inference",
+            "job_type": JobType.FLUX_KONTEXT.value,
             "is_audit_job": False,
             "completed_at": (now - timedelta(seconds=5)).isoformat(),
             "metrics": {"latency_ms": 2_000},
@@ -146,7 +146,7 @@ def test_failure_penalty_with_existing_record(database_service: PostgresClient) 
     success_job = {
         "job_id": "success-1",
         "status": "success",
-        "job_type": "inference",
+        "job_type": JobType.FLUX_KONTEXT.value,
         "is_audit_job": False,
         "completed_at": (base_time + timedelta(seconds=30)).isoformat(),
         "metrics": {"latency_ms": 1_000},
@@ -163,7 +163,7 @@ def test_failure_penalty_with_existing_record(database_service: PostgresClient) 
     failure_job = {
         "job_id": "failure-1",
         "status": "failed",
-        "job_type": "inference",
+        "job_type": JobType.FLUX_KONTEXT.value,
         "is_audit_job": False,
         "completed_at": (base_time + timedelta(minutes=1, seconds=30)).isoformat(),
     }

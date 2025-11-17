@@ -5,9 +5,10 @@ from typing import Any, Dict, List
 
 import pytest
 
+from orchestrator.common.job_store import JobType
 from orchestrator.domain.miner import Miner
 from orchestrator.schemas.scores import ScoresResponse
-from orchestrator.services.job_scoring import job_to_score
+from orchestrator.services.job_scoring import job_to_weighted_score
 from orchestrator.services.score_service import (
     ScoreHistory,
     ScoreSettings,
@@ -15,21 +16,29 @@ from orchestrator.services.score_service import (
 )
 
 
-def _make_success_job(completed_at: datetime, latency_ms: float) -> Dict[str, Any]:
+def _make_success_job(
+    completed_at: datetime,
+    latency_ms: float,
+    job_type: str = JobType.FLUX_KONTEXT.value,
+) -> Dict[str, Any]:
     return {
         "status": "success",
         "completed_at": completed_at.isoformat(),
         "metrics": {"latency_ms": latency_ms},
-        "job_type": "inference",
+        "job_type": job_type,
         "is_audit_job": False,
     }
 
 
-def _make_failure_job(completed_at: datetime, status: str = "failed") -> Dict[str, Any]:
+def _make_failure_job(
+    completed_at: datetime,
+    status: str = "failed",
+    job_type: str = JobType.FLUX_KONTEXT.value,
+) -> Dict[str, Any]:
     return {
         "status": status,
         "completed_at": completed_at.isoformat(),
-        "job_type": "inference",
+        "job_type": job_type,
         "is_audit_job": False,
     }
 
@@ -45,14 +54,14 @@ def test_score_history_success_sequence() -> None:
     history = ScoreHistory.from_jobs(
         jobs,
         existing_record=None,
-        score_fn=job_to_score,
+        score_fn=job_to_weighted_score,
         settings=settings,
         reference_time=now,
     )
 
     assert history.success_count == 2
     assert history.failure_count == 0
-    last_sample = job_to_score(jobs[-1])
+    last_sample = job_to_weighted_score(jobs[-1])
     # Allow minor decay between the last sample timestamp and the reference time.
     assert history.ema_score == pytest.approx(last_sample, rel=1e-3)
     assert history.scores == pytest.approx(last_sample, rel=1e-3)
@@ -74,7 +83,7 @@ def test_score_history_decay_halflife() -> None:
     history = ScoreHistory.from_jobs(
         [],
         existing_record=record_payload,
-        score_fn=job_to_score,
+        score_fn=job_to_weighted_score,
         settings=settings,
         reference_time=datetime.now(timezone.utc),
     )
@@ -92,7 +101,7 @@ def test_score_history_failure_penalty_caps_score() -> None:
     history = ScoreHistory.from_jobs(
         [success, failure],
         existing_record=None,
-        score_fn=job_to_score,
+        score_fn=job_to_weighted_score,
         settings=settings,
         reference_time=now,
     )
@@ -101,8 +110,9 @@ def test_score_history_failure_penalty_caps_score() -> None:
     assert history.failure_count == 1
     assert history.success_count == 1
     # EMA decays slightly between the sample timestamp and reference time.
-    assert history.ema_score == pytest.approx(job_to_score(success), rel=1e-3)
-    assert history.scores == pytest.approx(expected_penalized)
+    weighted_success = job_to_weighted_score(success)
+    assert history.ema_score == pytest.approx(weighted_success, rel=1e-3)
+    assert history.scores == pytest.approx(min(weighted_success, expected_penalized))
     assert history.scores < history.ema_score
 
 
@@ -166,5 +176,6 @@ async def test_build_scores_from_state_applies_failure_penalty() -> None:
     assert "hk" in response.scores
     score_value = response.scores["hk"].score.total_score
     expected_penalized = max(1 - ScoreSettings().failure_penalty_weight, 0)
-    assert score_value == pytest.approx(expected_penalized)
+    weighted_success = job_to_weighted_score(success)
+    assert score_value == pytest.approx(min(weighted_success, expected_penalized))
     assert response.stats["failures_total"] == 1
