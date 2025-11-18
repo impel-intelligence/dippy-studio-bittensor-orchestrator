@@ -9,9 +9,8 @@ from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
-from fastapi import HTTPException, status
-
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient
+from orchestrator.common.datetime import parse_datetime, parse_timestamp, timestamp_to_iso
 from orchestrator.common.job_store import (
     AuditStatus,
     Job,
@@ -21,6 +20,13 @@ from orchestrator.common.job_store import (
     JobType,
 )
 from orchestrator.schemas.job import JobRecord
+from orchestrator.services.exceptions import (
+    JobNotFound,
+    JobQueryError,
+    JobRelayError,
+    JobServiceError,
+    JobValidationError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +78,7 @@ class JobService:
                 "job_type": self._job_type_to_str(job_type),
                 "miner_hotkey": hotkey,
                 "payload": prepared_payload,
-                "creation_timestamp": self._timestamp_to_iso(created_at),
+                "creation_timestamp": timestamp_to_iso(created_at),
                 "status": JobStatus.PENDING.value,
                 "audit_status": AuditStatus.NOT_AUDITED.value,
                 "verification_status": "nonverified",
@@ -97,68 +103,56 @@ class JobService:
                 prompt_seed=seed,
                 audit_status=AuditStatus.NOT_AUDITED,
             )
-        except HTTPException:
+        except JobServiceError:
             raise
         except Exception as exc:
             logger.exception("job.create_failed job_type=%s", job_type)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=str(exc),
-            ) from exc
+            raise JobRelayError("Failed to create job in relay") from exc
 
     async def update_job(self, job_id: uuid.UUID, payload: Any) -> Job:
         try:
             response_timestamp = time.time()
             updates = {
                 "response_payload": payload,
-                "response_timestamp": self._timestamp_to_iso(response_timestamp),
-                "completed_at": self._timestamp_to_iso(response_timestamp),
-                "last_updated_at": self._timestamp_to_iso(response_timestamp),
+                "response_timestamp": timestamp_to_iso(response_timestamp),
+                "completed_at": timestamp_to_iso(response_timestamp),
+                "last_updated_at": timestamp_to_iso(response_timestamp),
                 "status": JobStatus.SUCCESS.value,
                 "failure_reason": None,
             }
             await self._sync_job_update(job_id, updates)
             return await self.get_job(job_id)
-        except HTTPException:
+        except JobServiceError:
             raise
         except Exception as exc:
             logger.exception("job.update_failed job_id=%s", job_id)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=str(exc),
-            ) from exc
+            raise JobRelayError("Failed to update job in relay") from exc
 
     async def get_job(self, job_id: uuid.UUID) -> Job:
         try:
             record = await self.job_relay.fetch_job(job_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception("jobrelay.fetch_failed job_id=%s", job_id)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to fetch job from relay",
-            ) from exc
+            raise JobRelayError("Failed to fetch job from relay") from exc
 
         if record is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Job not found",
-            )
+            raise JobNotFound(f"Job {job_id} not found")
 
         return self._job_from_record(record)
 
     async def mark_job_prepared(self, job_id: uuid.UUID, prepared_at: float | None = None) -> Job:
         timestamp = prepared_at if prepared_at is not None else time.time()
         updates = {
-            "prepared_at": self._timestamp_to_iso(timestamp),
+            "prepared_at": timestamp_to_iso(timestamp),
             "failure_reason": None,
-            "last_updated_at": self._timestamp_to_iso(timestamp),
+            "last_updated_at": timestamp_to_iso(timestamp),
         }
         await self._sync_job_update(job_id, updates)
         return await self.get_job(job_id)
 
     async def mark_job_dispatched(self, job_id: uuid.UUID, dispatched_at: float | None = None) -> Job:
         timestamp = dispatched_at if dispatched_at is not None else time.time()
-        iso_timestamp = self._timestamp_to_iso(timestamp)
+        iso_timestamp = timestamp_to_iso(timestamp)
         updates = {
             "dispatched_at": iso_timestamp,
             "miner_received_at": iso_timestamp,
@@ -168,7 +162,7 @@ class JobService:
         return await self.get_job(job_id)
 
     async def mark_job_failure(self, job_id: uuid.UUID, reason: str) -> Job:
-        timestamp = self._timestamp_to_iso(time.time())
+        timestamp = timestamp_to_iso(time.time())
         updates = {
             "status": JobStatus.FAILED.value,
             "failure_reason": reason,
@@ -184,10 +178,7 @@ class JobService:
         limit: Optional[int] = None,
     ) -> list[JobRecord]:
         if limit is not None and limit <= 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Parameter 'limit' must be a positive integer",
-            )
+            raise JobQueryError("Parameter 'limit' must be a positive integer")
 
         records = await self._list_jobs()
         jobs: List[Job] = []
@@ -213,10 +204,7 @@ class JobService:
         """Return the most recent completed jobs bounded by lookback window."""
 
         if max_results <= 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Parameter 'max_results' must be a positive integer",
-            )
+            raise JobQueryError("Parameter 'max_results' must be a positive integer")
 
         records = await self._list_jobs()
         cutoff_dt: datetime | None = None
@@ -234,7 +222,7 @@ class JobService:
             status = self._parse_job_status(record.get("status"))
             if status not in completed_states:
                 continue
-            completed_dt = self._iso_to_datetime(
+            completed_dt = parse_datetime(
                 record.get("completed_at") or record.get("response_timestamp")
             )
             if completed_dt is None:
@@ -307,29 +295,20 @@ class JobService:
             await self.job_relay.update_job(job_id, updates)
         except Exception as exc:  # noqa: BLE001
             logger.exception("jobrelay.update_failed job_id=%s", job_id)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to update job in relay",
-            ) from exc
+            raise JobRelayError("Failed to update job in relay") from exc
 
     async def _list_jobs(self) -> list[Dict[str, Any]]:
         try:
             return await self.job_relay.list_jobs()
         except Exception as exc:  # noqa: BLE001
             logger.exception("jobrelay.list_failed")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to list jobs from relay",
-            ) from exc
+            raise JobRelayError("Failed to list jobs from relay") from exc
 
     @staticmethod
     def _prepare_payload(payload: Any) -> Dict[str, Any]:
         if isinstance(payload, dict):
             return deepcopy(payload)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Job payload must be a JSON object",
-        )
+        raise JobValidationError("Job payload must be a JSON object")
 
     @staticmethod
     def _normalize_seed(value: Any) -> Optional[int]:
@@ -348,39 +327,6 @@ class JobService:
     @staticmethod
     def _job_type_to_str(job_type: JobType) -> str:
         return getattr(job_type, "value", job_type)
-
-    @staticmethod
-    def _timestamp_to_iso(timestamp: float | None) -> Optional[str]:
-        if timestamp is None:
-            return None
-        try:
-            dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-        except (OSError, OverflowError, ValueError):
-            return None
-        return dt.isoformat()
-
-    @staticmethod
-    def _iso_to_timestamp(value: Any) -> Optional[float]:
-        if value is None:
-            return None
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, datetime):
-            return value.astimezone(timezone.utc).timestamp()
-        if isinstance(value, str) and value.strip():
-            try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-            return parsed.astimezone(timezone.utc).timestamp()
-        return None
-
-    @staticmethod
-    def _iso_to_datetime(value: Any) -> Optional[datetime]:
-        timestamp = JobService._iso_to_timestamp(value)
-        if timestamp is None:
-            return None
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
 
     @staticmethod
     def _parse_uuid(value: Any) -> Optional[uuid.UUID]:
@@ -425,7 +371,7 @@ class JobService:
         job_type = self._parse_job_type(record.get("job_type"))
 
         request_payload = deepcopy(record.get("payload") or {})
-        creation_ts = self._iso_to_timestamp(record.get("creation_timestamp"))
+        creation_ts = parse_timestamp(record.get("creation_timestamp"))
         if creation_ts is None:
             creation_ts = time.time()
         job_request = JobRequest(
@@ -435,7 +381,7 @@ class JobService:
         )
 
         response_payload = record.get("response_payload")
-        response_timestamp = self._iso_to_timestamp(
+        response_timestamp = parse_timestamp(
             record.get("response_timestamp") or record.get("completed_at")
         )
         job_response: Optional[JobResponse] = None
@@ -448,8 +394,8 @@ class JobService:
         callback_secret = record.get("callback_secret") or request_payload.get("callback_secret")
         prompt_seed = self._normalize_seed(record.get("prompt_seed") or request_payload.get("seed"))
 
-        prepared_at = self._iso_to_timestamp(record.get("prepared_at"))
-        dispatched_at = self._iso_to_timestamp(
+        prepared_at = parse_timestamp(record.get("prepared_at"))
+        dispatched_at = parse_timestamp(
             record.get("dispatched_at") or record.get("miner_received_at")
         )
 

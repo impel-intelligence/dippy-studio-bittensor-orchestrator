@@ -16,10 +16,12 @@ from orchestrator.dependencies import (
     get_miner_metagraph_service,
     get_score_service,
 )
+from orchestrator.routes.error_mapping import raise_job_service_error
 from orchestrator.schemas.job import JobRecord
 from orchestrator.services.job_service import JobService
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.services.score_service import ScoreRecord, ScoreService
+from orchestrator.services.exceptions import JobServiceError
 
 
 logger = logging.getLogger("orchestrator.routes.internal")
@@ -108,11 +110,14 @@ def create_internal_router() -> APIRouter:
         request: CreateJobRequest,
         job_service: JobService = Depends(get_job_service),
     ) -> Job:
-        return await job_service.create_job(
-            job_type=request.job_type,
-            payload=request.payload,
-            hotkey=request.hotkey,
-        )
+        try:
+            return await job_service.create_job(
+                job_type=request.job_type,
+                payload=request.payload,
+                hotkey=request.hotkey,
+            )
+        except JobServiceError as exc:
+            raise_job_service_error(exc)
 
     @router.put("/job/{job_id}", response_model=Job, status_code=status.HTTP_200_OK)
     async def update_job(
@@ -120,7 +125,10 @@ def create_internal_router() -> APIRouter:
         request: UpdateJobRequest,
         job_service: JobService = Depends(get_job_service),
     ) -> Job:
-        return await job_service.update_job(job_id=job_id, payload=request.payload)
+        try:
+            return await job_service.update_job(job_id=job_id, payload=request.payload)
+        except JobServiceError as exc:
+            raise_job_service_error(exc)
 
     @router.get("/stats", response_model=StatsResponse, status_code=status.HTTP_200_OK)
     async def stats(
@@ -136,7 +144,10 @@ def create_internal_router() -> APIRouter:
             if last_update_dt is not None:
                 metagraph_last_update = last_update_dt.isoformat()
 
-        job_totals = await job_service.get_job_totals()
+        try:
+            job_totals = await job_service.get_job_totals()
+        except JobServiceError as exc:
+            raise_job_service_error(exc)
         return StatsResponse(
             epistula_loaded=keypair is not None,
             epistula_ss58=epistula_ss58,
@@ -175,7 +186,10 @@ def create_internal_router() -> APIRouter:
         if statuses is not None and not statuses:
             jobs: list[JobRecord] = []
         else:
-            jobs = await job_service.dump_jobs(statuses=statuses, limit=limit)
+            try:
+                jobs = await job_service.dump_jobs(statuses=statuses, limit=limit)
+            except JobServiceError as exc:
+                raise_job_service_error(exc)
 
         return LiveJobDumpResponse(jobs=jobs)
 

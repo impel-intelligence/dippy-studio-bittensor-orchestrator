@@ -5,14 +5,13 @@ from copy import deepcopy
 from typing import Any, Optional
 from urllib import error as urllib_error
 
-from fastapi import HTTPException, status
-
 from orchestrator.common.epistula_client import EpistulaClient
 from orchestrator.common.job_store import JobType
 from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.domain.miner import Miner
 from orchestrator.services.job_service import JobService
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
+from orchestrator.services.exceptions import MinerSelectionError
 
 
 _TASK_TYPE_PAYLOAD_OVERRIDES: dict[JobType, dict[str, str]] = {
@@ -86,10 +85,7 @@ class ListenEngine:
                 "listen.no_candidate",
                 job_type=str(job_type),
             )
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Candidate miner not found",
-            )
+            raise MinerSelectionError("Candidate miner not found")
         return miner
 
     async def _create_job(

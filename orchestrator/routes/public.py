@@ -24,6 +24,11 @@ from orchestrator.dependencies import (
     get_structured_logger,
 )
 from orchestrator.routes.internal import MetagraphDumpResponse
+from orchestrator.routes.error_mapping import (
+    raise_callback_service_error,
+    raise_job_service_error,
+    raise_listen_service_error,
+)
 from orchestrator.schemas.job import CompletedJobSummary, CompletedJobsResponse
 from orchestrator.schemas.scores import ScorePayload, ScoreValue, ScoresResponse
 from orchestrator.services.callback_service import CallbackService, CALLBACK_SECRET_HEADER
@@ -32,10 +37,16 @@ from orchestrator.services.job_service import JobService, JobWaitCancelledError,
 from orchestrator.services.listen_service import ListenService
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.services.score_service import ScoreService, build_scores_from_state
+from orchestrator.services.exceptions import (
+    CallbackServiceError,
+    JobServiceError,
+    ListenServiceError,
+)
 
 
 LISTEN_AUTH_HEADER = "X-Service-Auth-Secret"
 LISTEN_AUTH_SECRET = "orchestrator-listen-secret"
+BURN_HOTKEY = "5EtM9iXMAYRsmt6aoQAoWNDX6yaBnjhmnEQhWKv8HpwkVtML"
 
 logger = logging.getLogger("orchestrator.routes.public")
 
@@ -92,12 +103,17 @@ def create_public_router() -> APIRouter:
                 detail="Invalid service auth secret",
             )
 
-        job_id = await listen_service.process(
-            job_type=listen_request.job_type,
-            payload=listen_request.payload,
-            desired_job_id=listen_request.job_id,
-            slog=slog,
-        )
+        try:
+            job_id = await listen_service.process(
+                job_type=listen_request.job_type,
+                payload=listen_request.payload,
+                desired_job_id=listen_request.job_id,
+                slog=slog,
+            )
+        except ListenServiceError as exc:
+            raise_listen_service_error(exc)
+        except JobServiceError as exc:
+            raise_job_service_error(exc)
 
         return ListenResponse(job_id=job_id)
 
@@ -127,12 +143,17 @@ def create_public_router() -> APIRouter:
             request_has_job_id=bool(listen_request.job_id),
         )
 
-        job_id = await listen_service.process(
-            job_type=listen_request.job_type,
-            payload=listen_request.payload,
-            desired_job_id=listen_request.job_id,
-            slog=slog,
-        )
+        try:
+            job_id = await listen_service.process(
+                job_type=listen_request.job_type,
+                payload=listen_request.payload,
+                desired_job_id=listen_request.job_id,
+                slog=slog,
+            )
+        except ListenServiceError as exc:
+            raise_listen_service_error(exc)
+        except JobServiceError as exc:
+            raise_job_service_error(exc)
 
         listen_sync_cfg = getattr(getattr(config, "listen", None), "sync", None)
         timeout_seconds = 10.0
@@ -175,6 +196,8 @@ def create_public_router() -> APIRouter:
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail=str(exc),
             ) from exc
+        except JobServiceError as exc:
+            raise_job_service_error(exc)
 
         duration_ms = int((time.monotonic() - start_wait) * 1000)
         result_payload: Any | None = None
@@ -245,6 +268,7 @@ def create_public_router() -> APIRouter:
             stored_scores = score_service.all()
             metagraph_state = metagraph.dump_full_state()
             scores_payload: dict[str, ScorePayload] = {}
+
             for hotkey, record in stored_scores.items():
                 miner = metagraph_state.get(hotkey)
                 failed_audits = getattr(miner, "failed_audits", 0) if miner else 0
@@ -254,6 +278,16 @@ def create_public_router() -> APIRouter:
                     score=ScoreValue(total_score=float(record.scores)),
                 )
 
+            # Calculate empty_scores by summing all scores
+            total_score_sum = sum(float(record.scores) for record in stored_scores.values())
+            empty_scores = total_score_sum < 1
+
+            if empty_scores:
+                payload = ScorePayload(
+                status="COMPLETED",
+                score=ScoreValue(total_score=1.0),
+                )
+                scores_payload[BURN_HOTKEY] = payload
             stats = {
                 "source": "score_service",
                 "requested": len(scores_payload),
@@ -284,10 +318,13 @@ def create_public_router() -> APIRouter:
         job_service: JobService = Depends(get_job_service),
     ) -> CompletedJobsResponse:
         lookback_days = 7
-        records = await job_service.list_recent_completed_jobs(
-            max_results=limit,
-            lookback_days=lookback_days,
-        )
+        try:
+            records = await job_service.list_recent_completed_jobs(
+                max_results=limit,
+                lookback_days=lookback_days,
+            )
+        except JobServiceError as exc:
+            raise_job_service_error(exc)
         summaries = [CompletedJobSummary.from_job_record(record) for record in records]
         return CompletedJobsResponse(jobs=summaries, limit=limit, lookback_days=lookback_days)
 
@@ -339,6 +376,22 @@ def create_public_router() -> APIRouter:
                 image=image,
                 received_at=received_at,
             )
+        except CallbackServiceError as exc:
+            logger.warning(
+                "results_callback.callback_error job_id=%s status=%s detail=%s",
+                job_id,
+                status,
+                str(exc),
+            )
+            raise_callback_service_error(exc)
+        except JobServiceError as exc:
+            logger.warning(
+                "results_callback.job_service_error job_id=%s status=%s detail=%s",
+                job_id,
+                status,
+                str(exc),
+            )
+            raise_job_service_error(exc)
         except HTTPException as http_exc:
             cause = getattr(http_exc, "__cause__", None)
             cause_type = type(cause).__name__ if cause else None

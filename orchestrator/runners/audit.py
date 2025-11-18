@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
+from orchestrator.common.datetime import parse_datetime
 from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.domain.miner import Miner
 from orchestrator.services.audit_service import AuditRunSummary, AuditService
@@ -219,7 +220,7 @@ class AuditSeedRunner(_BaseAuditRunner):
     def _extract_timestamp(job: dict[str, Any]) -> datetime:
         for key in ("completed_at", "last_updated_at", "creation_timestamp"):
             value = job.get(key)
-            parsed = AuditSeedRunner._parse_datetime(value)
+            parsed = parse_datetime(value)
             if parsed is not None:
                 return parsed
         return datetime.fromtimestamp(0, tz=timezone.utc)
@@ -271,24 +272,6 @@ class AuditSeedRunner(_BaseAuditRunner):
             except (TypeError, ValueError):
                 pass
         return secrets.randbelow(2**32)
-
-    @staticmethod
-    def _parse_datetime(value: Any) -> datetime | None:
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            if value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc)
-        if isinstance(value, str) and value.strip():
-            try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-            if parsed.tzinfo is None:
-                return parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc)
-        return None
 
 
 

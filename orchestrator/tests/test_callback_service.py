@@ -26,6 +26,7 @@ class _StubUploader(BaseUploader):
     def __init__(self, uri: str) -> None:
         super().__init__()
         self._uri = uri
+        self.calls: list[dict[str, object]] = []
 
     def upload_bytes(
         self,
@@ -34,14 +35,26 @@ class _StubUploader(BaseUploader):
         content: bytes,
         filename: str | None = None,
         content_type: str | None = None,
+        job_type: str | None = None,
     ) -> str:
+        self.calls.append(
+            {
+                "job_id": job_id,
+                "filename": filename,
+                "content_type": content_type,
+                "job_type": job_type,
+            }
+        )
         return self._uri
 
 
 class _FakeJob:
     def __init__(self) -> None:
         self.job_id = uuid.uuid4()
-        self.job_request = SimpleNamespace(timestamp=datetime.now(timezone.utc).timestamp())
+        self.job_request = SimpleNamespace(
+            timestamp=datetime.now(timezone.utc).timestamp(),
+            job_type="generate",
+        )
         self.dispatched_at = None
         self.callback_secret = "secret"
 
@@ -99,6 +112,7 @@ async def test_process_callback_appends_image_hash(monkeypatch: pytest.MonkeyPat
     assert status == "success"
     assert job_service.updated_payload is not None
     assert job_service.updated_payload.get("image_sha256") == expected_hash
+    assert uploader.calls and uploader.calls[-1]["job_type"] == "generate"
 
 
 class _MockResponse:

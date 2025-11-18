@@ -23,14 +23,16 @@ class BaseUploader:
         content: bytes,
         filename: Optional[str] = None,
         content_type: Optional[str] = None,
+        job_type: Optional[str] = None,
     ) -> Optional[str]:
         """Return None to signal that no upload occurred."""
 
         self._logger.info(
-            "callback.upload.noop job_id=%s filename=%s bytes=%s",
+            "callback.upload.noop job_id=%s filename=%s bytes=%s job_type=%s",
             job_id,
             filename,
             len(content),
+            job_type,
         )
         return None
 
@@ -79,6 +81,7 @@ class GCSUploader(BaseUploader):
         content: bytes,
         filename: Optional[str] = None,
         content_type: Optional[str] = None,
+        job_type: Optional[str] = None,
     ) -> Optional[str]:
         suffix = Path(filename).suffix if filename else ""
         if not suffix:
@@ -86,15 +89,18 @@ class GCSUploader(BaseUploader):
 
         unique_name = f"{job_id}{suffix}"
 
-        prefix_part = f"{self.prefix}/" if self.prefix else ""
-        blob_name = f"{prefix_part}{unique_name}"
+        normalized_job_type = self._normalize_job_type(job_type)
+        path_parts = [part for part in (self.prefix, normalized_job_type) if part]
+        prefix_path = "/".join(path_parts)
+        blob_name = f"{prefix_path}/{unique_name}" if prefix_path else unique_name
 
         self._logger.info(
-            "callback.gcs_upload_start bucket=%s blob=%s bytes=%s job_id=%s",
+            "callback.gcs_upload_start bucket=%s blob=%s bytes=%s job_id=%s job_type=%s",
             self.bucket,
             blob_name,
             len(content),
             job_id,
+            job_type,
         )
 
         blob = self._bucket.blob(blob_name)
@@ -102,23 +108,41 @@ class GCSUploader(BaseUploader):
             blob.upload_from_string(content, content_type=content_type)
         except Exception:
             self._logger.exception(
-                "callback.gcs_upload_error bucket=%s blob=%s job_id=%s content_type=%s",
+                "callback.gcs_upload_error bucket=%s blob=%s job_id=%s content_type=%s job_type=%s",
                 self.bucket,
                 blob_name,
                 job_id,
                 content_type,
+                job_type,
             )
             raise
 
         self._logger.info(
-            "callback.gcs_upload_complete bucket=%s blob=%s bytes=%s job_id=%s",
+            "callback.gcs_upload_complete bucket=%s blob=%s bytes=%s job_id=%s job_type=%s",
             self.bucket,
             blob_name,
             len(content),
             job_id,
+            job_type,
         )
 
         return f"gs://{self.bucket}/{blob_name}"
+
+    @staticmethod
+    def _normalize_job_type(job_type: Optional[str]) -> Optional[str]:
+        if not job_type:
+            return None
+        normalized = str(job_type).strip().lower()
+        if not normalized:
+            return None
+        sanitized_chars = []
+        for char in normalized:
+            if char.isalnum() or char in {"-", "_"}:
+                sanitized_chars.append(char)
+            else:
+                sanitized_chars.append("-")
+        sanitized = "".join(sanitized_chars).strip("-_")
+        return sanitized or None
 
 
 __all__ = ["BaseUploader", "GCSUploader"]

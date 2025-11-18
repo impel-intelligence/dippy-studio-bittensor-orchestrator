@@ -19,6 +19,7 @@ except ImportError:
 
 from orchestrator.clients.database import PostgresClient
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient
+from orchestrator.common.datetime import ensure_aware, parse_datetime
 from orchestrator.common.model_utils import dump_model, validate_model
 from orchestrator.domain.miner import Miner
 from orchestrator.schemas.scores import ScorePayload, ScoreValue, ScoresResponse
@@ -225,26 +226,12 @@ class ScoreRepository:
         candidates: list[datetime] = []
         for field in self._TIMESTAMP_FIELDS:
             value = data.get(field)
-            parsed = self._parse_datetime(value)
+            parsed = parse_datetime(value)
             if parsed is not None:
                 candidates.append(parsed)
 
         if candidates:
             return max(candidates)
-        return None
-
-    @staticmethod
-    def _parse_datetime(value: Any) -> Optional[datetime]:
-        if isinstance(value, datetime):
-            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        if isinstance(value, str):
-            try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-            if parsed.tzinfo is None:
-                return parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc)
         return None
 
 
@@ -865,7 +852,7 @@ class ScoreHistory:
     extra_fields: dict[str, Any] = field(default_factory=dict)
 
     def apply_decay(self, reference_time: datetime) -> None:
-        reference = self._ensure_aware(reference_time)
+        reference = ensure_aware(reference_time)
         baseline = self.last_ema_update_at or self.last_success_at
         if baseline is None:
             self.last_ema_update_at = reference
@@ -885,7 +872,7 @@ class ScoreHistory:
 
     def register_success(self, sample: float, event_time: datetime, job: Mapping[str, Any] | None = None) -> None:
         value = self._clamp_score(sample)
-        event = self._ensure_aware(event_time)
+        event = ensure_aware(event_time)
         alpha = max(0.0, min(self.settings.ema_alpha, 1.0))
         if alpha >= 1.0:
             ema = value
@@ -909,7 +896,7 @@ class ScoreHistory:
         self.extra_fields['ema_alpha'] = self.settings.ema_alpha
 
     def register_failure(self, event_time: datetime, job: Mapping[str, Any] | None = None) -> None:
-        event = self._ensure_aware(event_time)
+        event = ensure_aware(event_time)
         self.failure_count += 1
         self.last_ema_update_at = event
         self.legacy_score = self._compute_legacy()
@@ -967,8 +954,8 @@ class ScoreHistory:
         success_count = cls._coerce_int(payload.get('success_count'), default=0)
         failure_count = cls._coerce_int(payload.get('failure_count'), default=0)
         sample_count = cls._coerce_int(payload.get('sample_count'), default=success_count)
-        last_success_at = cls._parse_datetime(payload.get('last_sample_at'))
-        last_ema_update_at = cls._parse_datetime(
+        last_success_at = parse_datetime(payload.get('last_sample_at'))
+        last_ema_update_at = parse_datetime(
             payload.get('ema_last_update_at') or payload.get('last_score_update_at')
         )
 
@@ -1105,24 +1092,6 @@ class ScoreHistory:
             return default
 
     @staticmethod
-    def _parse_datetime(value: Any) -> datetime | None:
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            if value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc)
-        if isinstance(value, str):
-            try:
-                parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
-            except ValueError:
-                return None
-            if parsed.tzinfo is None:
-                return parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc)
-        return None
-
-    @staticmethod
     def _extract_event_time(job: Mapping[str, Any]) -> datetime | None:
         candidates = (
             job.get('completed_at'),
@@ -1132,16 +1101,10 @@ class ScoreHistory:
             job.get('creation_timestamp'),
         )
         for candidate in candidates:
-            parsed = ScoreHistory._parse_datetime(candidate)
+            parsed = parse_datetime(candidate)
             if parsed is not None:
                 return parsed
         return None
-
-    @staticmethod
-    def _ensure_aware(value: datetime) -> datetime:
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
 
 
 
@@ -1149,27 +1112,6 @@ _DEFAULT_LOOKBACK_WINDOW = timedelta(days=7)
 _COMPLETED_INFERENCE_STATUSES = {"success", "failed", "timeout"}
 _SUCCESSFUL_INFERENCE_STATUSES = {"success"}
 _HOTKEY_FETCH_CONCURRENCY = 8
-
-
-def _parse_datetime(value: Any) -> Optional[datetime]:
-    if value is None:
-        return None
-
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
-
-    if isinstance(value, str):
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-
-    return None
 
 
 def _is_relevant_inference_job(

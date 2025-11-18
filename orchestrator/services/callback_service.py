@@ -8,11 +8,18 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import HTTPException, UploadFile, status
+from fastapi import UploadFile
 
 from orchestrator.common.job_store import JobStatus
 from orchestrator.clients.storage import BaseUploader
 from orchestrator.services.job_service import JobService
+from orchestrator.services.exceptions import (
+    CallbackImageError,
+    CallbackImageUploadError,
+    CallbackSecretMismatch,
+    CallbackSecretMissing,
+    CallbackValidationError,
+)
 
 
 CALLBACK_SECRET_HEADER = "X-Callback-Secret"
@@ -44,6 +51,8 @@ class CallbackService:
             logger.exception("callback.job_fetch_failed job_id=%s", job_id)
             raise
 
+        job_type = self._extract_job_type(job)
+
         await self._verify_secret(job, provided_secret, job_service, job_uuid)
 
         image_bytes, image_filename, image_content_type = await self._prepare_image(
@@ -55,6 +64,7 @@ class CallbackService:
             completed_at=completed_at,
             image_bytes=image_bytes,
             image_filename=image_filename,
+            job_type=job_type,
         )
 
         image_info = await self._upload_image(
@@ -64,6 +74,7 @@ class CallbackService:
             image_bytes=image_bytes,
             image_filename=image_filename,
             image_content_type=image_content_type,
+            job_type=job_type,
         )
         if image_info.get("image_uri"):
             image_hash = await self._hash_remote_image(
@@ -120,10 +131,7 @@ class CallbackService:
                 image.filename if image else None,
             )
             await job_service.mark_job_failure(job_uuid, "empty_image_payload")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Image payload is empty",
-            )
+            raise CallbackImageError("Image payload is empty")
 
         return image_bytes, image.filename, image.content_type
 
@@ -135,15 +143,17 @@ class CallbackService:
         completed_at: str,
         image_bytes: Optional[bytes],
         image_filename: Optional[str],
+        job_type: Optional[str],
     ) -> None:
         logger.info(
-            "callback.process_start job_id=%s status=%s completed_at=%s has_image=%s filename=%s bytes=%s",
+            "callback.process_start job_id=%s status=%s completed_at=%s has_image=%s filename=%s bytes=%s job_type=%s",
             job_id,
             status,
             completed_at,
             bool(image_bytes),
             image_filename,
             len(image_bytes) if image_bytes is not None else 0,
+            job_type,
         )
 
     async def _upload_image(
@@ -155,18 +165,20 @@ class CallbackService:
         image_bytes: Optional[bytes],
         image_filename: Optional[str],
         image_content_type: Optional[str],
+        job_type: Optional[str],
     ) -> Dict[str, Any]:
         if image_bytes is None:
             return {}
 
         uploader_name = type(self._uploader).__name__
         logger.info(
-            "callback.image_upload_attempt job_id=%s filename=%s content_type=%s bytes=%s uploader=%s",
+            "callback.image_upload_attempt job_id=%s filename=%s content_type=%s bytes=%s uploader=%s job_type=%s",
             job_id,
             image_filename,
             image_content_type,
             len(image_bytes),
             uploader_name,
+            job_type,
         )
         try:
             image_uri = self._uploader.upload_bytes(
@@ -174,28 +186,28 @@ class CallbackService:
                 content=image_bytes,
                 filename=image_filename,
                 content_type=image_content_type,
+                job_type=job_type,
             )
         except Exception as exc:  # noqa: BLE001 - uploader failure guard
             logger.exception(
-                "callback.image_upload_failed job_id=%s filename=%s uploader=%s error=%s",
+                "callback.image_upload_failed job_id=%s filename=%s uploader=%s error=%s job_type=%s",
                 job_id,
                 image_filename,
                 uploader_name,
                 exc,
+                job_type,
             )
             await job_service.mark_job_failure(job_uuid, "callback_upload_failed")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to upload callback image",
-            ) from exc
+            raise CallbackImageUploadError("Failed to upload callback image") from exc
 
         if image_uri:
             image_size = len(image_bytes)
             logger.info(
-                "callback.image_uploaded job_id=%s uri=%s bytes=%s",
+                "callback.image_uploaded job_id=%s uri=%s bytes=%s job_type=%s",
                 job_id,
                 image_uri,
                 image_size,
+                job_type,
             )
             return {
                 "image_uri": image_uri,
@@ -204,9 +216,10 @@ class CallbackService:
             }
 
         logger.info(
-            "callback.image_upload_skipped job_id=%s filename=%s",
+            "callback.image_upload_skipped job_id=%s filename=%s job_type=%s",
             job_id,
             image_filename,
+            job_type,
         )
         return {}
 
@@ -249,6 +262,18 @@ class CallbackService:
         if image_uri.startswith("gs://"):
             return f"https://storage.googleapis.com/{image_uri[5:]}"
         return image_uri
+
+    @staticmethod
+    def _extract_job_type(job: Any) -> Optional[str]:
+        job_request = getattr(job, "job_request", None)
+        if job_request is None:
+            return None
+        raw_job_type = getattr(job_request, "job_type", None)
+        if raw_job_type is None:
+            return None
+        value = getattr(raw_job_type, "value", raw_job_type)
+        text = str(value).strip()
+        return text or None
 
     def _calculate_latencies(
         self,
@@ -330,10 +355,7 @@ class CallbackService:
         try:
             return uuid.UUID(job_id)
         except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid job_id provided",
-            ) from exc
+            raise CallbackValidationError("Invalid job_id provided") from exc
 
     async def _verify_secret(
         self,
@@ -346,10 +368,7 @@ class CallbackService:
         if not expected_secret:
             logger.error("callback.secret_missing job_id=%s", job_uuid)
             await job_service.mark_job_failure(job_uuid, "callback_secret_missing")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Job callback secret is not configured",
-            )
+            raise CallbackSecretMissing("Job callback secret is not configured")
 
         if provided_secret != expected_secret:
             logger.warning(
@@ -358,10 +377,7 @@ class CallbackService:
                 bool(provided_secret),
             )
             await job_service.mark_job_failure(job_uuid, "callback_secret_mismatch")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Callback secret mismatch",
-            )
+            raise CallbackSecretMismatch("Callback secret mismatch")
 
     async def list_callbacks(
         self,
