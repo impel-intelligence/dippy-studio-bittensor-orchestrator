@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -10,6 +10,7 @@ import pytest
 
 from orchestrator.services.callback_service import CallbackService
 from orchestrator.clients.storage import BaseUploader
+from orchestrator.services.exceptions import CallbackValidationError
 
 
 class _FakeUploadFile:
@@ -159,3 +160,52 @@ async def test_hash_remote_image_fetches_and_hashes(monkeypatch: pytest.MonkeyPa
 
     assert recorder == ["https://storage.googleapis.com/bucket/path/file.png"]
     assert digest == hashlib.sha256(payload).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_process_callback_enforces_flux_kontext_runtime_minimum() -> None:
+    service = CallbackService()
+    job_service = _FakeJobService()
+    job_service.job.job_request.job_type = "img-h100_pcie"
+    received_at = datetime.now(timezone.utc)
+    job_service.job.job_request.timestamp = (received_at - timedelta(seconds=2)).timestamp()
+    job_id_str = str(job_service.job.job_id)
+
+    with pytest.raises(CallbackValidationError):
+        await service.process_callback(
+            job_service=job_service,
+            job_id=job_id_str,
+            status="success",
+            completed_at=received_at.isoformat(),
+            error=None,
+            provided_secret="secret",
+            image=None,
+            received_at=received_at,
+        )
+
+    assert job_service.failures[-1] == "flux_kontext_min_runtime_violation"
+    assert job_service.updated_payload is None
+
+
+@pytest.mark.asyncio
+async def test_process_callback_allows_flux_kontext_runtime_after_threshold() -> None:
+    service = CallbackService()
+    job_service = _FakeJobService()
+    job_service.job.job_request.job_type = "img-h100_pcie"
+    received_at = datetime.now(timezone.utc)
+    job_service.job.job_request.timestamp = (received_at - timedelta(seconds=20)).timestamp()
+    job_id_str = str(job_service.job.job_id)
+
+    status, _ = await service.process_callback(
+        job_service=job_service,
+        job_id=job_id_str,
+        status="success",
+        completed_at=received_at.isoformat(),
+        error=None,
+        provided_secret="secret",
+        image=None,
+        received_at=received_at,
+    )
+
+    assert status == "success"
+    assert job_service.updated_payload is not None

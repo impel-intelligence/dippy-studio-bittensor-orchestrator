@@ -304,6 +304,20 @@ def create_public_router() -> APIRouter:
         )
 
     @router.get(
+        "/jobs/{job_id}",
+        status_code=status.HTTP_200_OK,
+    )
+    async def get_job(
+        job_id: uuid.UUID,
+        job_service: JobService = Depends(get_job_service),
+    ) -> dict[str, Any]:
+        try:
+            record = await job_service.fetch_masked_job_record(job_id=job_id)
+        except JobServiceError as exc:
+            raise_job_service_error(exc)
+        return record
+
+    @router.get(
         "/completed_jobs",
         response_model=CompletedJobsResponse,
         status_code=status.HTTP_200_OK,

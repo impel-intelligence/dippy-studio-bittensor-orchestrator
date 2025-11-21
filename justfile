@@ -39,8 +39,13 @@ devlogs:
 	docker compose --file docker-compose-local.yml logs -f orchestrator-dev jobrelay
 
 # Tail logs for orchestrator only
-orclogs:
-	docker compose --file docker-compose-local.yml logs -f orchestrator-dev
+orclogs tail='':
+	@if [ -n "{{tail}}" ]; then \
+		TAIL_FLAG="--tail={{tail}}"; \
+	else \
+		TAIL_FLAG=""; \
+	fi; \
+	docker compose --file docker-compose-local.yml logs ${TAIL_FLAG} -f orchestrator-dev
 
 # Restart the orchestrator-dev service
 orchestrator-restart:

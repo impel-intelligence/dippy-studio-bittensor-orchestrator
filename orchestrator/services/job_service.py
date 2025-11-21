@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
 import time
@@ -128,16 +129,29 @@ class JobService:
             logger.exception("job.update_failed job_id=%s", job_id)
             raise JobRelayError("Failed to update job in relay") from exc
 
+    async def get_job_record(self, job_id: uuid.UUID) -> Dict[str, Any]:
+        """Return the raw job record from the relay without any transformation."""
+
+        return await self._fetch_job_record(job_id)
+
+    async def fetch_masked_job_record(self, job_id: uuid.UUID) -> Dict[str, Any]:
+        """Return the job record with the prompt field hashed for privacy."""
+
+        record = await self._fetch_job_record(job_id)
+        masked_record = deepcopy(record)
+        
+        # Hash the prompt in the payload if it exists
+        if "payload" in masked_record and isinstance(masked_record["payload"], dict):
+            payload = masked_record["payload"]
+            if "prompt" in payload:
+                prompt_value = payload["prompt"]
+                hashed = self._hash_value(prompt_value)
+                payload["prompt"] = hashed
+        
+        return masked_record
+
     async def get_job(self, job_id: uuid.UUID) -> Job:
-        try:
-            record = await self.job_relay.fetch_job(job_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("jobrelay.fetch_failed job_id=%s", job_id)
-            raise JobRelayError("Failed to fetch job from relay") from exc
-
-        if record is None:
-            raise JobNotFound(f"Job {job_id} not found")
-
+        record = await self._fetch_job_record(job_id)
         return self._job_from_record(record)
 
     async def mark_job_prepared(self, job_id: uuid.UUID, prepared_at: float | None = None) -> Job:
@@ -297,6 +311,17 @@ class JobService:
             logger.exception("jobrelay.update_failed job_id=%s", job_id)
             raise JobRelayError("Failed to update job in relay") from exc
 
+    async def _fetch_job_record(self, job_id: uuid.UUID) -> Dict[str, Any]:
+        try:
+            record = await self.job_relay.fetch_job(job_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("jobrelay.fetch_failed job_id=%s", job_id)
+            raise JobRelayError("Failed to fetch job from relay") from exc
+
+        if record is None:
+            raise JobNotFound(f"Job {job_id} not found")
+        return record
+
     async def _list_jobs(self) -> list[Dict[str, Any]]:
         try:
             return await self.job_relay.list_jobs()
@@ -365,6 +390,13 @@ class JobService:
             return AuditStatus(str(value))
         except Exception:  # noqa: BLE001
             return AuditStatus.NOT_AUDITED
+
+    @staticmethod
+    def _hash_value(value: Any) -> str:
+        """Hash a value using SHA256 and return in the format 'sha256:hash'."""
+        text = str(value) if value is not None else ""
+        digest = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+        return f"sha256:{digest}"
 
     def _job_from_record(self, record: Dict[str, Any]) -> Job:
         job_id = self._parse_uuid(record.get("job_id")) or uuid.uuid4()

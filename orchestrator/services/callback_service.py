@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from fastapi import UploadFile
 
-from orchestrator.common.job_store import JobStatus
+from orchestrator.common.job_store import JobStatus, JobType
 from orchestrator.clients.storage import BaseUploader
 from orchestrator.services.job_service import JobService
 from orchestrator.services.exceptions import (
@@ -26,6 +26,11 @@ CALLBACK_SECRET_HEADER = "X-Callback-Secret"
 
 logger = logging.getLogger(__name__)
 
+_FLUX_KONTEXT_JOB_TYPES = {
+    JobType.FLUX_KONTEXT.value,
+    "flux_kontext",
+}
+_FLUX_KONTEXT_MIN_RUNTIME_MS = 10_000
 
 class CallbackService:
     def __init__(self, uploader: Optional[BaseUploader] = None) -> None:
@@ -85,6 +90,12 @@ class CallbackService:
                 image_info["image_sha256"] = image_hash
 
         latencies = self._calculate_latencies(job, received_at)
+        await self._enforce_flux_kontext_runtime(
+            job_type=job_type,
+            total_runtime_ms=latencies.get("total_runtime_ms"),
+            job_service=job_service,
+            job_uuid=job_uuid,
+        )
         result_payload = self._compose_result_payload(
             status=status,
             error=error,
@@ -378,6 +389,34 @@ class CallbackService:
             )
             await job_service.mark_job_failure(job_uuid, "callback_secret_mismatch")
             raise CallbackSecretMismatch("Callback secret mismatch")
+
+    async def _enforce_flux_kontext_runtime(
+        self,
+        *,
+        job_type: Optional[str],
+        total_runtime_ms: Optional[int],
+        job_service: JobService,
+        job_uuid: uuid.UUID,
+    ) -> None:
+        if not job_type:
+            return
+        normalized = job_type.strip().lower()
+        if normalized not in _FLUX_KONTEXT_JOB_TYPES:
+            return
+        if total_runtime_ms is None:
+            return
+        if total_runtime_ms >= _FLUX_KONTEXT_MIN_RUNTIME_MS:
+            return
+
+        logger.warning(
+            "callback.flux_kontext_runtime_violation job_id=%s job_type=%s elapsed_ms=%s min_required_ms=%s",
+            job_uuid,
+            job_type,
+            total_runtime_ms,
+            _FLUX_KONTEXT_MIN_RUNTIME_MS,
+        )
+        await job_service.mark_job_failure(job_uuid, "flux_kontext_min_runtime_violation")
+        raise CallbackValidationError("Flux-Kontext jobs must run for at least 10 seconds before completing")
 
     async def list_callbacks(
         self,
