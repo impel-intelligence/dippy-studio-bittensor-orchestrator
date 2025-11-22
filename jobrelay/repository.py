@@ -28,8 +28,8 @@ class InferenceJobRepository:
     def fetch_job(self, job_id: UUID) -> Optional[Dict[str, object]]:
         return self._manager.fetch_job(job_id)
 
-    def fetch_all(self) -> List[Dict[str, object]]:
-        return self._manager.fetch_all()
+    def fetch_all(self, limit: int | None = None) -> List[Dict[str, object]]:
+        return self._manager.fetch_all(limit=limit)
 
     def fetch_for_hotkey(
         self,

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Dict
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 
 from .background import BackgroundJobProcessor
 from .config import Settings, get_settings
@@ -60,6 +61,29 @@ def create_app() -> FastAPI:
 
     auth_dependency = Depends(_build_auth_dependency(settings))
 
+    @app.get("/jobs", dependencies=[auth_dependency])
+    async def fetch_all_jobs(
+        repository_dep: InferenceJobRepository = Depends(get_repository_dependency),
+    ) -> dict:
+        records = []
+        for item in repository_dep.fetch_all():
+            serialized = _record_to_dict(item)
+            if serialized is not None:
+                records.append(serialized)
+        return {"jobs": records}
+
+    @app.get("/jobs/recent", dependencies=[auth_dependency])
+    async def fetch_recent_jobs(
+        limit: int = Query(1000, ge=1, le=10000),
+        repository_dep: InferenceJobRepository = Depends(get_repository_dependency),
+    ) -> dict:
+        records = []
+        for item in repository_dep.fetch_all(limit=limit):
+            serialized = _record_to_dict(item)
+            if serialized is not None:
+                records.append(serialized)
+        return {"jobs": records}
+
     @app.post("/jobs/{job_id}", dependencies=[auth_dependency])
     async def create_inference_job(
         job_id: UUID,
@@ -94,13 +118,6 @@ def create_app() -> FastAPI:
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
         return InferenceJob(**_normalize_record(record))
-
-    @app.get("/jobs", dependencies=[auth_dependency])
-    async def fetch_all_jobs(
-        repository_dep: InferenceJobRepository = Depends(get_repository_dependency),
-    ) -> dict:
-        records = [_record_to_dict(item) for item in repository_dep.fetch_all()]
-        return {"jobs": records}
 
     @app.post("/nuclear", dependencies=[auth_dependency])
     async def nuclear_wipe(
@@ -147,12 +164,27 @@ def _normalize_record(record: dict) -> dict:
     normalized["job_id"] = str(normalized["job_id"])
     if "audit_target_job_id" in normalized and normalized["audit_target_job_id"] is not None:
         normalized["audit_target_job_id"] = str(normalized["audit_target_job_id"])
+
+    def _maybe_parse_json(value):
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except Exception:  # noqa: BLE001
+                return value
+        return value
+
+    normalized["payload"] = _maybe_parse_json(normalized.get("payload"))
+    normalized["response_payload"] = _maybe_parse_json(normalized.get("response_payload"))
     return normalized
 
 
-def _record_to_dict(record: dict) -> dict:
-    model = InferenceJob(**_normalize_record(record))
-    return model.model_dump(mode="json")
+def _record_to_dict(record: dict) -> dict | None:
+    try:
+        model = InferenceJob(**_normalize_record(record))
+        return model.model_dump(mode="json")
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("record.serialization_failed job_id=%s error=%s", record.get("job_id"), exc)
+        return None
 
 
 app = create_app()

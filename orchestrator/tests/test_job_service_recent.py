@@ -23,6 +23,9 @@ class _StubJobRelay:
     async def list_jobs(self) -> list[dict]:
         return self._records
 
+    async def list_recent_jobs(self, *, limit: int) -> list[dict]:
+        return self._records[:limit]
+
 
 def _make_record(
     *,

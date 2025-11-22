@@ -28,8 +28,12 @@ class BaseJobRelayClient:
         logger.debug("jobrelay.fetch.noop job_id=%s", job_id)
         return None
 
-    async def list_jobs(self) -> list[Dict[str, Any]]:  # pragma: no cover - noop
-        logger.debug("jobrelay.list.noop")
+    async def list_jobs(self, *, limit: int | None = None) -> list[Dict[str, Any]]:  # pragma: no cover - noop
+        logger.debug("jobrelay.list.noop limit=%s", limit)
+        return []
+
+    async def list_recent_jobs(self, *, limit: int) -> list[Dict[str, Any]]:  # pragma: no cover - noop
+        logger.debug("jobrelay.list_recent.noop limit=%s", limit)
         return []
 
     async def list_jobs_for_hotkey(
@@ -86,8 +90,19 @@ class JobRelayHttpClient(BaseJobRelayClient):
             return None
         return response
 
-    async def list_jobs(self) -> list[Dict[str, Any]]:
+    async def list_jobs(self, *, limit: int | None = None) -> list[Dict[str, Any]]:
+        if limit is not None and limit > 0:
+            return await self.list_recent_jobs(limit=limit)
         payload = await self._request("GET", "/jobs", json=None, params=None)
+        if isinstance(payload, dict):
+            jobs = payload.get("jobs", [])
+            if isinstance(jobs, list):
+                return jobs
+        return []
+
+    async def list_recent_jobs(self, *, limit: int) -> list[Dict[str, Any]]:
+        params: Dict[str, Any] = {"limit": int(limit)}
+        payload = await self._request("GET", "/jobs/recent", json=None, params=params)
         if isinstance(payload, dict):
             jobs = payload.get("jobs", [])
             if isinstance(jobs, list):

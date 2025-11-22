@@ -204,7 +204,8 @@ class JobService:
         if limit is not None and limit <= 0:
             raise JobQueryError("Parameter 'limit' must be a positive integer")
 
-        records = await self._list_jobs()
+        fetch_limit = max(max_results * 3, max_results)
+        records = await self._list_jobs(limit=fetch_limit)
         jobs: List[Job] = []
         allowed_statuses = {status for status in statuses} if statuses else None
         for record in records:
@@ -230,7 +231,8 @@ class JobService:
         if max_results <= 0:
             raise JobQueryError("Parameter 'max_results' must be a positive integer")
 
-        records = await self._list_jobs()
+        fetch_limit = max(max_results * 3, max_results)
+        records = await self._list_jobs(limit=fetch_limit)
         cutoff_dt: datetime | None = None
         if lookback_days is not None:
             try:
@@ -332,9 +334,11 @@ class JobService:
             raise JobNotFound(f"Job {job_id} not found")
         return record
 
-    async def _list_jobs(self) -> list[Dict[str, Any]]:
+    async def _list_jobs(self, *, limit: int | None = None) -> list[Dict[str, Any]]:
         try:
-            return await self.job_relay.list_jobs()
+            if limit is not None and limit > 0 and hasattr(self.job_relay, "list_recent_jobs"):
+                return await self.job_relay.list_recent_jobs(limit=limit)  # type: ignore[arg-type]
+            return await self.job_relay.list_jobs(limit=limit)
         except Exception as exc:  # noqa: BLE001
             logger.exception("jobrelay.list_failed")
             raise JobRelayError("Failed to list jobs from relay") from exc

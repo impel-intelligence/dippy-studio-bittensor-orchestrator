@@ -322,10 +322,9 @@ class JobRelayDuckDBManager:
             return None
         return snapshot_records[0]
 
-    def fetch_all(self) -> List[Dict[str, object]]:
+    def fetch_all(self, limit: int | None = None) -> List[Dict[str, object]]:
         with self._read_cursor() as cursor:
-            cursor.execute(
-                """
+            query = """
                 SELECT job_id, job_type, miner_hotkey, payload,
                        result_image_url, creation_timestamp, last_updated_at,
                        miner_received_at, completed_at, execution_duration_ms,
@@ -335,15 +334,23 @@ class JobRelayDuckDBManager:
                        response_payload, response_timestamp,
                        callback_secret, prompt_seed
                 FROM inference_jobs
-                """
-            )
+                ORDER BY COALESCE(completed_at, response_timestamp, last_updated_at, creation_timestamp) DESC
+            """
+            parameters: list[object] = []
+            if limit is not None and limit > 0:
+                query += " LIMIT ?"
+                parameters.append(int(limit))
+            cursor.execute(query, parameters)
             rows = cursor.fetchall()
             columns = [desc[0] for desc in cursor.description]
             local_records = [self._row_to_dict(columns, row) for row in rows]
 
         snapshot_records = self._load_latest_snapshot_records()
         merged = self._merge_records(local_records, snapshot_records)
-        return self._sort_records(merged)
+        sorted_records = self._sort_records(merged)
+        if limit is not None and limit > 0:
+            return sorted_records[:limit]
+        return sorted_records
 
     def fetch_for_hotkey(
         self,
