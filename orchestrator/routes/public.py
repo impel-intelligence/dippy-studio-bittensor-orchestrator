@@ -29,7 +29,7 @@ from orchestrator.routes.error_mapping import (
     raise_job_service_error,
     raise_listen_service_error,
 )
-from orchestrator.schemas.job import CompletedJobSummary, CompletedJobsResponse
+from orchestrator.schemas.job import RecentJobsResponse
 from orchestrator.schemas.scores import ScorePayload, ScoreValue, ScoresResponse
 from orchestrator.services.callback_service import CallbackService, CALLBACK_SECRET_HEADER
 from orchestrator.services.health_service import HealthService
@@ -318,29 +318,22 @@ def create_public_router() -> APIRouter:
         return record
 
     @router.get(
-        "/completed_jobs",
-        response_model=CompletedJobsResponse,
+        "/recent_jobs",
+        response_model=RecentJobsResponse,
         status_code=status.HTTP_200_OK,
     )
-    async def get_recent_completed_jobs(
-        limit: int = Query(
-            100,
-            ge=1,
-            le=100,
-            description="Maximum number of completed jobs to return (default 100)",
-        ),
+    async def get_recent_jobs(
+        limit: int = Query(1000, ge=1, le=1000, description="Number of recent jobs to return (max 1000)"),
         job_service: JobService = Depends(get_job_service),
-    ) -> CompletedJobsResponse:
-        lookback_days = 7
+    ) -> RecentJobsResponse:
         try:
-            records = await job_service.list_recent_completed_jobs(
+            records = await job_service.list_recent_completed_job_records(
                 max_results=limit,
-                lookback_days=lookback_days,
+                lookback_days=None,
             )
         except JobServiceError as exc:
             raise_job_service_error(exc)
-        summaries = [CompletedJobSummary.from_job_record(record) for record in records]
-        return CompletedJobsResponse(jobs=summaries, limit=limit, lookback_days=lookback_days)
+        return RecentJobsResponse(jobs=records, limit=limit)
 
     @router.get("/health", status_code=status.HTTP_200_OK)
     async def health(

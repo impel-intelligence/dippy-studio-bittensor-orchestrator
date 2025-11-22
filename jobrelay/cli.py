@@ -14,6 +14,7 @@ import duckdb
 from dateutil import parser as date_parser
 
 from .config import get_settings
+from .duckdb_manager import JobRelayDuckDBManager
 from .models import JobStatus
 
 
@@ -203,7 +204,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include payload and response payload columns.",
     )
     completed_parser.set_defaults(func=_completed_command)
+
+    restore_parser = subparsers.add_parser(
+        "restore-snapshots",
+        help="Load all GCS snapshots into the local DuckDB (read-only against GCS).",
+    )
+    restore_parser.add_argument(
+        "--max-snapshots",
+        type=int,
+        default=None,
+        help="Limit how many latest snapshots to restore (default: all).",
+    )
+    restore_parser.add_argument(
+        "--keep-existing",
+        action="store_true",
+        help="Merge with existing DuckDB rows instead of replacing (default: replace).",
+    )
+    restore_parser.set_defaults(func=_restore_snapshots_command)
     return parser
+
+
+def _restore_snapshots_command(args: argparse.Namespace) -> int:
+    settings = get_settings()
+    manager = JobRelayDuckDBManager(settings)
+    try:
+        result = manager.restore_all_snapshots(
+            replace=not args.keep_existing,
+            max_snapshots=args.max_snapshots,
+        )
+    finally:
+        manager.close()
+
+    print(
+        json.dumps(
+            {
+                "snapshots_processed": result.get("snapshots_processed", 0),
+                "restored_rows": result.get("restored_rows", 0),
+                "deduped_rows": result.get("deduped_rows", 0),
+                "replaced_existing": not args.keep_existing,
+            },
+            default=_json_default,
+            indent=2,
+        )
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

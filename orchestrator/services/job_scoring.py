@@ -9,6 +9,11 @@ _JOB_TYPE_WEIGHTS: dict[str, float] = {
 }
 
 
+def job_latency_ms(job: Mapping[str, Any]) -> Optional[float]:
+    """Return the first latency metric found for a job, or None when missing."""
+    return _extract_latency_ms(job)
+
+
 def job_to_score(job: Mapping[str, Any], *, max_latency_ms: float = DEFAULT_MAX_LATENCY_MS) -> float:
     """Score an inference job based on its latency.
 
@@ -115,5 +120,6 @@ __all__ = [
     "job_to_score",
     "job_to_weighted_score",
     "job_type_has_weight",
+    "job_latency_ms",
     "DEFAULT_MAX_LATENCY_MS",
 ]

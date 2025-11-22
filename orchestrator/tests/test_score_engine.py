@@ -80,7 +80,7 @@ class StubJobService:
 
 
 def _build_engine(repository: InMemoryScoreRepository, relay: MutableJobRelay) -> ScoreEngine:
-    settings = ScoreSettings(ema_alpha=1.0, ema_half_life_seconds=60.0, failure_penalty_weight=0.2)
+    settings = ScoreSettings(ema_alpha=0.3, ema_half_life_seconds=60.0, failure_penalty_weight=0.7)
     return ScoreEngine(
         repository=repository,  # type: ignore[arg-type]
         job_service=StubJobService(relay),  # type: ignore[arg-type]

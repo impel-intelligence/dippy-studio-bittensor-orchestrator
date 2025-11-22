@@ -47,6 +47,34 @@ services:
     env_file:
       - .env
 
+  python-runner:
+    build:
+      context: .
+      dockerfile: orchestrator/orchestrator.dev.Dockerfile
+    command: sleep infinity
+    volumes:
+      - .:/app
+      - ${HOME}/.bittensor:/home/appuser/.bittensor:ro
+      - ./gcs_service_account.json:/app/gcs_service_account.json:ro
+    environment:
+      - EPISTULA_HOTKEY_PATH=/home/appuser/.bittensor/wallets/coldkey/hotkeys/hotkey
+      - CALLBACK_GCS_BUCKET=${CALLBACK_GCS_BUCKET}
+      - CALLBACK_GCS_PREFIX=${CALLBACK_GCS_PREFIX:-callbacks}
+      - CALLBACK_GCS_CREDENTIALS=${CALLBACK_GCS_CREDENTIALS:-/app/gcs_service_account.json}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcs_service_account.json}
+      - JOBRELAY_BASE_URL=${JOBRELAY_BASE_URL:-http://jobrelay:8181}
+      - JOBRELAY_TIMEOUT_SECONDS=${JOBRELAY_TIMEOUT_SECONDS:-5}
+      - DATABASE_URL=postgresql://orchestrator:orchestrator@postgres:5432/orchestrator
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      jobrelay:
+        condition: service_started
+
   postgres:
     image: postgres:18
     ports:

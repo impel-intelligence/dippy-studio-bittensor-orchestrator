@@ -46,9 +46,11 @@ def _make_failure_job(
 def test_score_history_success_sequence() -> None:
     settings = ScoreSettings().normalized()
     now = datetime.now(timezone.utc)
+    first_ts = now - timedelta(minutes=10)
+    second_ts = now - timedelta(minutes=5)
     jobs: List[Dict[str, Any]] = [
-        _make_success_job(now - timedelta(minutes=10), latency_ms=1_000),
-        _make_success_job(now - timedelta(minutes=5), latency_ms=5_000),
+        _make_success_job(first_ts, latency_ms=1_000),
+        _make_success_job(second_ts, latency_ms=5_000),
     ]
 
     history = ScoreHistory.from_jobs(
@@ -61,10 +63,14 @@ def test_score_history_success_sequence() -> None:
 
     assert history.success_count == 2
     assert history.failure_count == 0
-    last_sample = job_to_weighted_score(jobs[-1])
-    # Allow minor decay between the last sample timestamp and the reference time.
-    assert history.ema_score == pytest.approx(last_sample, rel=1e-3)
-    assert history.scores == pytest.approx(last_sample, rel=1e-3)
+    value_first = job_to_weighted_score(jobs[0])
+    value_second = job_to_weighted_score(jobs[1])
+    decay_between = 0.5 ** ((second_ts - first_ts).total_seconds() / settings.ema_half_life_seconds)
+    decay_to_reference = 0.5 ** ((now - second_ts).total_seconds() / settings.ema_half_life_seconds)
+    ema_after_second = settings.ema_alpha * value_second + (1.0 - settings.ema_alpha) * (value_first * decay_between)
+    expected_score = ema_after_second * decay_to_reference
+    assert history.ema_score == pytest.approx(expected_score, rel=1e-5)
+    assert history.scores == pytest.approx(expected_score, rel=1e-5)
 
 
 def test_score_history_decay_halflife() -> None:
@@ -106,14 +112,15 @@ def test_score_history_failure_penalty_caps_score() -> None:
         reference_time=now,
     )
 
-    expected_penalized = max(1 - settings.failure_penalty_weight, 0)
     assert history.failure_count == 1
     assert history.success_count == 1
-    # EMA decays slightly between the sample timestamp and reference time.
     weighted_success = job_to_weighted_score(success)
-    assert history.ema_score == pytest.approx(weighted_success, rel=1e-3)
-    assert history.scores == pytest.approx(min(weighted_success, expected_penalized))
-    assert history.scores < history.ema_score
+    penalty_factor = 1.0 - settings.failure_penalty_weight
+    decay_before_failure = 0.5 ** (60.0 / settings.ema_half_life_seconds)
+    decay_after_failure = 0.5 ** (60.0 / settings.ema_half_life_seconds)
+    expected_score = weighted_success * decay_before_failure * penalty_factor * decay_after_failure
+    assert history.ema_score == pytest.approx(expected_score, rel=1e-5)
+    assert history.scores == pytest.approx(expected_score, rel=1e-5)
 
 
 class _DummyRelay:
@@ -154,8 +161,10 @@ class _DummyRelay:
 @pytest.mark.asyncio
 async def test_build_scores_from_state_applies_failure_penalty() -> None:
     now = datetime.now(timezone.utc)
-    success = _make_success_job(now - timedelta(minutes=3), latency_ms=1_000)
-    failure = _make_failure_job(now - timedelta(minutes=1), status="failed")
+    success_at = now - timedelta(minutes=3)
+    failure_at = now - timedelta(minutes=1)
+    success = _make_success_job(success_at, latency_ms=1_000)
+    failure = _make_failure_job(failure_at, status="failed")
 
     relay = _DummyRelay({"hk": [success, failure]})
     miner = Miner(
@@ -175,7 +184,11 @@ async def test_build_scores_from_state_applies_failure_penalty() -> None:
 
     assert "hk" in response.scores
     score_value = response.scores["hk"].score.total_score
-    expected_penalized = max(1 - ScoreSettings().failure_penalty_weight, 0)
+    settings = ScoreSettings().normalized()
     weighted_success = job_to_weighted_score(success)
-    assert score_value == pytest.approx(min(weighted_success, expected_penalized))
+    penalty_factor = 1.0 - settings.failure_penalty_weight
+    decay_before_failure = 0.5 ** ((failure_at - success_at).total_seconds() / settings.ema_half_life_seconds)
+    decay_after_failure = 0.5 ** ((datetime.now(timezone.utc) - failure_at).total_seconds() / settings.ema_half_life_seconds)
+    expected_penalized = weighted_success * decay_before_failure * penalty_factor * decay_after_failure
+    assert score_value == pytest.approx(expected_penalized, rel=1e-4)
     assert response.stats["failures_total"] == 1

@@ -12,6 +12,7 @@ from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.domain.miner import Miner
 from orchestrator.clients.database import PostgresClient
 from orchestrator.services.score_service import ScoreRecord, ScoreService
+from orchestrator.services.job_scoring import job_to_weighted_score
 
 
 INTEGRATION_DSN = os.getenv(
@@ -126,8 +127,8 @@ def test_jobs_to_score_persists_ema_fields(database_service: PostgresClient) -> 
     assert db_payload["success_count"] == 1
     assert db_payload["failure_count"] == 0
     assert db_payload["sample_count"] == 1
-    assert db_payload["ema_alpha"] == pytest.approx(1.0)
-    assert db_payload["failure_penalty_weight"] == pytest.approx(0.2)
+    assert db_payload["ema_alpha"] == pytest.approx(0.3)
+    assert db_payload["failure_penalty_weight"] == pytest.approx(0.7)
     assert db_payload["decay_half_life_seconds"] == pytest.approx(604_800.0)
 
     for key in ("last_sample_at", "ema_last_update_at"):
@@ -152,14 +153,6 @@ def test_failure_penalty_with_existing_record(database_service: PostgresClient) 
         "metrics": {"latency_ms": 1_000},
     }
 
-    first_records = score_service.jobs_to_score(
-        {hotkey: [success_job]},
-        reference_time=base_time + timedelta(minutes=1),
-    )
-    assert score_service.update_scores(first_records)
-    existing_record = score_service.get(hotkey)
-    assert existing_record is not None
-
     failure_job = {
         "job_id": "failure-1",
         "status": "failed",
@@ -168,10 +161,11 @@ def test_failure_penalty_with_existing_record(database_service: PostgresClient) 
         "completed_at": (base_time + timedelta(minutes=1, seconds=30)).isoformat(),
     }
 
+    jobs = [success_job, failure_job]
+    reference_time = base_time + timedelta(minutes=2)
     updated_records = score_service.jobs_to_score(
-        {hotkey: [failure_job]},
-        reference_time=base_time + timedelta(minutes=2),
-        existing_records={hotkey: existing_record},
+        {hotkey: jobs},
+        reference_time=reference_time,
     )
     assert score_service.update_scores(updated_records)
 
@@ -181,16 +175,22 @@ def test_failure_penalty_with_existing_record(database_service: PostgresClient) 
 
     assert payload["success_count"] == 1
     assert payload["failure_count"] == 1
-    expected_penalty = max(payload["success_count"] - payload["failure_penalty_weight"] * payload["failure_count"], 0)
-    assert payload["legacy_score"] == pytest.approx(expected_penalty)
-    assert payload["scores"] == pytest.approx(min(payload["ema_score"], expected_penalty))
-    assert payload["scores"] < payload["ema_score"]
+    assert payload["sample_count"] == 1
+    penalty_factor = 1.0 - payload["failure_penalty_weight"]
+    decay_half_life = payload["decay_half_life_seconds"]
+    success_at = datetime.fromisoformat(success_job["completed_at"])
+    failure_at = datetime.fromisoformat(failure_job["completed_at"])
+    decay_before_failure = 0.5 ** ((failure_at - success_at).total_seconds() / decay_half_life)
+    decay_after_failure = 0.5 ** ((reference_time - failure_at).total_seconds() / decay_half_life)
+    raw_score = job_to_weighted_score(success_job)
+    expected_score = raw_score * decay_before_failure * penalty_factor * decay_after_failure
+    assert payload["scores"] == pytest.approx(expected_score, rel=1e-5)
+    assert payload["ema_score"] == pytest.approx(expected_score, rel=1e-5)
 
     db_payload = _decode_scores_payload(database_service, hotkey)
     assert db_payload["failure_count"] == 1
     assert db_payload["success_count"] == 1
     assert db_payload["sample_count"] == 1
-    assert db_payload["legacy_score"] == pytest.approx(expected_penalty)
     assert db_payload["scores"] == pytest.approx(payload["scores"])
     assert db_payload.get("last_job_id") == "failure-1"
     assert db_payload.get("ema_last_update_at") is not None

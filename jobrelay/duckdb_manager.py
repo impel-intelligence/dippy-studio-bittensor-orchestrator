@@ -9,7 +9,7 @@ import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 from uuid import UUID
 
 import duckdb
@@ -29,6 +29,33 @@ LOGGER = logging.getLogger("jobrelay.duckdb_manager")
 
 class JobRelayDuckDBManager:
     """Owns DuckDB connections, schema management, and GCS sync plumbing."""
+
+    _FETCH_COLUMNS = [
+        "job_id",
+        "job_type",
+        "miner_hotkey",
+        "payload",
+        "result_image_url",
+        "creation_timestamp",
+        "last_updated_at",
+        "miner_received_at",
+        "completed_at",
+        "execution_duration_ms",
+        "expires_at",
+        "status",
+        "audit_status",
+        "verification_status",
+        "is_audit_job",
+        "audit_target_job_id",
+        "prepared_at",
+        "dispatched_at",
+        "failure_reason",
+        "response_payload",
+        "response_timestamp",
+        "callback_secret",
+        "prompt_seed",
+    ]
+    _SNAPSHOT_METADATA_COLUMNS = ["snapshot_epoch"]
 
     def __init__(self, settings: Settings):
         self._settings = settings
@@ -286,10 +313,14 @@ class JobRelayDuckDBManager:
                 [job_id],
             )
             row = cursor.fetchone()
-            if row is None:
-                return None
-            columns = [desc[0] for desc in cursor.description]
-            return self._row_to_dict(columns, row)
+            if row is not None:
+                columns = [desc[0] for desc in cursor.description]
+                return self._row_to_dict(columns, row)
+
+        snapshot_records = self._load_latest_snapshot_records(job_id=str(job_id))
+        if not snapshot_records:
+            return None
+        return snapshot_records[0]
 
     def fetch_all(self) -> List[Dict[str, object]]:
         with self._read_cursor() as cursor:
@@ -308,7 +339,11 @@ class JobRelayDuckDBManager:
             )
             rows = cursor.fetchall()
             columns = [desc[0] for desc in cursor.description]
-            return [self._row_to_dict(columns, row) for row in rows]
+            local_records = [self._row_to_dict(columns, row) for row in rows]
+
+        snapshot_records = self._load_latest_snapshot_records()
+        merged = self._merge_records(local_records, snapshot_records)
+        return self._sort_records(merged)
 
     def fetch_for_hotkey(
         self,
@@ -346,7 +381,14 @@ class JobRelayDuckDBManager:
             )
             rows = cursor.fetchall()
             columns = [desc[0] for desc in cursor.description]
-            return [self._row_to_dict(columns, row) for row in rows]
+            local_records = [self._row_to_dict(columns, row) for row in rows]
+
+        snapshot_records = self._load_latest_snapshot_records(
+            hotkey=miner_hotkey,
+            since=since,
+        )
+        merged = self._merge_records(local_records, snapshot_records)
+        return self._sort_records(merged)
 
     def delete_expired(self, now: datetime) -> int:
         result = self._write_conn.execute(
@@ -465,6 +507,129 @@ class JobRelayDuckDBManager:
             as_dict["response_payload"] = json.loads(response_payload)
         return as_dict
 
+    def restore_all_snapshots(
+        self,
+        *,
+        replace: bool = True,
+        max_snapshots: int | None = None,
+    ) -> dict[str, object]:
+        """Load all GCS snapshots into local DuckDB without writing to GCS."""
+
+        blobs = self._list_snapshot_blobs()
+        if not blobs:
+            LOGGER.info("No snapshot blobs found; skipping restore")
+            return {"snapshots_processed": 0, "restored_rows": 0, "deduped_rows": 0}
+
+        if max_snapshots is not None and max_snapshots > 0:
+            blobs = blobs[-max_snapshots:]
+
+        frames: list[pd.DataFrame] = []
+        latest_snapshot_time: datetime | None = None
+
+        for blob in blobs:
+            snapshot_time = self._snapshot_time_from_blob(blob)
+            latest_snapshot_time = max(latest_snapshot_time, snapshot_time) if latest_snapshot_time else snapshot_time
+            local_path = None
+            try:
+                local_path = self._download_snapshot(blob)
+                frame = pd.read_parquet(local_path, engine="pyarrow")
+            except Exception:  # pragma: no cover - defensive logging
+                LOGGER.warning(
+                    "snapshot.restore.read_failed blob=%s",
+                    getattr(blob, "name", "<unknown>"),
+                    exc_info=True,
+                )
+                continue
+            finally:
+                if local_path is not None:
+                    try:
+                        local_path.unlink(missing_ok=True)
+                    except Exception:  # pragma: no cover - best effort
+                        LOGGER.debug("snapshot.restore.temp_cleanup_failed", exc_info=True)
+
+            if frame.empty:
+                continue
+
+            frame = self._normalize_snapshot_dataframe(frame)
+            frame["snapshot_epoch"] = snapshot_time
+            frames.append(frame)
+
+        if not frames:
+            LOGGER.info("No rows found across snapshot blobs; skipping restore")
+            return {"snapshots_processed": 0, "restored_rows": 0, "deduped_rows": 0}
+
+        combined = pd.concat(frames, ignore_index=True)
+        combined["job_id"] = combined["job_id"].astype(str)
+
+        deduped = combined.sort_values(
+            by=["snapshot_epoch", "completed_at", "job_id"],
+            kind="stable",
+        ).drop_duplicates(subset=["job_id"], keep="last")
+
+        records = deduped[self._FETCH_COLUMNS].to_dict(orient="records")
+        if replace:
+            self._write_conn.execute("DELETE FROM inference_jobs")
+        self._write_conn.register("snapshot_restore_all", deduped[self._FETCH_COLUMNS])
+        columns_csv = ", ".join(self._FETCH_COLUMNS)
+        self._write_conn.execute(
+            f"INSERT INTO inference_jobs ({columns_csv}) SELECT {columns_csv} FROM snapshot_restore_all"
+        )
+        self._write_conn.unregister("snapshot_restore_all")
+
+        if latest_snapshot_time is not None:
+            self._set_last_snapshot_time(latest_snapshot_time)
+
+        LOGGER.info(
+            "Restored %s inference job records from %s snapshots",
+            len(deduped.index),
+            len(frames),
+        )
+        return {
+            "snapshots_processed": len(frames),
+            "restored_rows": len(deduped.index),
+            "deduped_rows": len(deduped.index),
+        }
+
+    def _merge_records(
+        self,
+        local_records: List[Dict[str, object]],
+        snapshot_records: List[Dict[str, object]],
+    ) -> List[Dict[str, object]]:
+        if not snapshot_records:
+            return local_records
+        merged: Dict[str, Dict[str, object]] = {
+            str(record.get("job_id")): record for record in local_records
+        }
+        for record in snapshot_records:
+            job_id = str(record.get("job_id"))
+            if job_id in merged:
+                continue
+            merged[job_id] = record
+        return list(merged.values())
+
+    def _sort_records(self, records: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        def _parse_completed(value: Any) -> datetime:
+            if isinstance(value, datetime):
+                return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            if hasattr(value, "to_pydatetime"):
+                candidate = value.to_pydatetime()
+                return candidate if candidate.tzinfo else candidate.replace(tzinfo=timezone.utc)
+            if isinstance(value, str):
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    return datetime.min.replace(tzinfo=timezone.utc)
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+        return sorted(
+            records,
+            key=lambda record: (
+                _parse_completed(record.get("completed_at")),
+                str(record.get("job_id")),
+            ),
+        )
+
     def _get_last_snapshot_time(self) -> Optional[datetime]:
         row = self._write_conn.execute(
             "SELECT last_snapshot FROM duckdb_sync_state WHERE id = 1"
@@ -519,14 +684,10 @@ class JobRelayDuckDBManager:
         return f"gs://{bucket_name}/{blob_path}"
 
     def _fetch_latest_snapshot_metadata(self):
-        client = self._build_storage_client()
-        prefix = (self._settings.gcs_prefix or "").strip("/")
-        prefix_arg = f"{prefix}/" if prefix else None
-        blobs = list(client.list_blobs(self._settings.gcs_bucket, prefix=prefix_arg))
-        candidates = [blob for blob in blobs if hasattr(blob, "name") and blob.name.endswith(".parquet")]
+        candidates = self._list_snapshot_blobs()
         if not candidates:
             return None
-        latest = max(candidates, key=self._snapshot_time_from_blob)
+        latest = candidates[-1]
         snapshot_time = self._snapshot_time_from_blob(latest)
         return latest, snapshot_time
 
@@ -601,3 +762,138 @@ class JobRelayDuckDBManager:
             return self._db_path.stat().st_size / (1024 * 1024)
         except FileNotFoundError:
             return 0.0
+
+    def _load_latest_snapshot_records(
+        self,
+        *,
+        hotkey: str | None = None,
+        since: datetime | None = None,
+        job_id: str | None = None,
+    ) -> List[Dict[str, object]]:
+        bucket = self._settings.gcs_bucket
+        if not bucket:
+            return []
+
+        try:
+            snapshot = self._fetch_latest_snapshot_metadata()
+        except FileNotFoundError:
+            return []
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOGGER.warning(
+                "snapshot.list_failed bucket=%s prefix=%s",
+                bucket,
+                self._settings.gcs_prefix,
+                exc_info=exc,
+            )
+            return []
+
+        if snapshot is None:
+            return []
+
+        blob, _snapshot_time = snapshot
+        local_path: Path | None = None
+        try:
+            local_path = self._download_snapshot(blob)
+            df = pd.read_parquet(local_path, engine="pyarrow")
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOGGER.warning(
+                "snapshot.read_failed blob=%s",
+                getattr(blob, "name", "<unknown>"),
+                exc_info=exc,
+            )
+            return []
+        finally:
+            if local_path is not None:
+                try:
+                    local_path.unlink(missing_ok=True)
+                except Exception:  # pragma: no cover - best effort cleanup
+                    LOGGER.debug("snapshot.temp_cleanup_failed", exc_info=True)
+
+        if df.empty:
+            return []
+
+        normalized = self._normalize_snapshot_dataframe(df)
+        if hotkey:
+            normalized = normalized[normalized["miner_hotkey"] == hotkey]
+        if job_id:
+            normalized = normalized[normalized["job_id"] == str(job_id)]
+        if since is not None and "completed_at" in normalized.columns:
+            cutoff = since
+            if cutoff.tzinfo is None:
+                cutoff = cutoff.replace(tzinfo=timezone.utc)
+            else:
+                cutoff = cutoff.astimezone(timezone.utc)
+            normalized = normalized[
+                normalized["completed_at"].notna() & (normalized["completed_at"] >= cutoff)
+            ]
+
+        if normalized.empty:
+            return []
+
+        records = normalized[self._FETCH_COLUMNS].to_dict(orient="records")
+        return [self._coerce_snapshot_record(record) for record in records]
+
+    def _normalize_snapshot_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        frame = df.copy()
+        for column in self._FETCH_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = None
+
+        time_columns = [
+            "creation_timestamp",
+            "last_updated_at",
+            "miner_received_at",
+            "completed_at",
+            "expires_at",
+            "prepared_at",
+            "dispatched_at",
+            "response_timestamp",
+            "snapshot_epoch",
+        ]
+        for column in time_columns:
+            if column in frame.columns:
+                frame[column] = pd.to_datetime(frame[column], utc=True, errors="coerce")
+
+        frame["job_id"] = frame["job_id"].astype(str)
+        if "audit_target_job_id" in frame.columns:
+            frame["audit_target_job_id"] = frame["audit_target_job_id"].astype("string")
+
+        missing_payload = [col for col in ("payload", "response_payload") if col not in frame.columns]
+        for column in missing_payload:
+            frame[column] = None
+
+        return frame
+
+    def _coerce_snapshot_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        parsed = dict(record)
+        job_id = parsed.get("job_id")
+        if job_id is not None:
+            parsed["job_id"] = str(job_id)
+
+        payload = parsed.get("payload")
+        if isinstance(payload, str):
+            try:
+                parsed["payload"] = json.loads(payload)
+            except Exception:
+                LOGGER.debug("snapshot.payload_parse_failed", exc_info=True)
+
+        response_payload = parsed.get("response_payload")
+        if isinstance(response_payload, str):
+            try:
+                parsed["response_payload"] = json.loads(response_payload)
+            except Exception:
+                LOGGER.debug("snapshot.response_payload_parse_failed", exc_info=True)
+
+        return parsed
+
+    def _list_snapshot_blobs(self) -> list:
+        client = self._build_storage_client()
+        prefix = (self._settings.gcs_prefix or "").strip("/")
+        prefix_arg = f"{prefix}/" if prefix else None
+        blobs = [
+            blob
+            for blob in client.list_blobs(self._settings.gcs_bucket, prefix=prefix_arg)
+            if hasattr(blob, "name") and blob.name.endswith(".parquet")
+        ]
+        blobs.sort(key=self._snapshot_time_from_blob)
+        return blobs

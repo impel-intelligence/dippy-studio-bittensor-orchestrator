@@ -23,7 +23,7 @@ from orchestrator.common.datetime import ensure_aware, parse_datetime
 from orchestrator.common.model_utils import dump_model, validate_model
 from orchestrator.domain.miner import Miner
 from orchestrator.schemas.scores import ScorePayload, ScoreValue, ScoresResponse
-from orchestrator.services.job_scoring import job_to_weighted_score, job_type_has_weight
+from orchestrator.services.job_scoring import job_latency_ms, job_to_weighted_score, job_type_has_weight
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 
 if TYPE_CHECKING:
@@ -680,9 +680,9 @@ class ScoreService:
         netuid: int | None = None,
         network: str | None = None,
         fetch_concurrency: int = 8,
-        ema_alpha: float = 1.0,
+        ema_alpha: float = 0.3,
         ema_half_life_seconds: float = 604_800.0,
-        failure_penalty_weight: float = 0.2,
+        failure_penalty_weight: float = 0.7,
         score_fn: Callable[[Mapping[str, Any]], float] = job_to_weighted_score,
         job_filter: Callable[[Mapping[str, Any]], bool] | None = job_type_has_weight,
         lookback_days: float | int | None = 7,
@@ -819,9 +819,9 @@ class ScoreService:
 
 @dataclass
 class ScoreSettings:
-    ema_alpha: float = 1.0
+    ema_alpha: float = 0.3
     ema_half_life_seconds: float = 604_800.0
-    failure_penalty_weight: float = 0.2
+    failure_penalty_weight: float = 0.7
 
     def normalized(self) -> "ScoreSettings":
         alpha = max(0.0, min(float(self.ema_alpha), 1.0))
@@ -843,7 +843,6 @@ class ScoreHistory:
     settings: ScoreSettings
     scores: float = 0.0
     ema_score: float = 0.0
-    legacy_score: float = 0.0
     success_count: int = 0
     failure_count: int = 0
     sample_count: int = 0
@@ -874,7 +873,9 @@ class ScoreHistory:
         value = self._clamp_score(sample)
         event = ensure_aware(event_time)
         alpha = max(0.0, min(self.settings.ema_alpha, 1.0))
-        if alpha >= 1.0:
+        if self.sample_count == 0 and self.ema_score == 0.0:
+            ema = value
+        elif alpha >= 1.0:
             ema = value
         elif alpha <= 0.0:
             ema = self.ema_score
@@ -886,7 +887,6 @@ class ScoreHistory:
         self.success_count += 1
         self.last_success_at = event
         self.last_ema_update_at = event
-        self.legacy_score = self._compute_legacy()
         if job is not None:
             job_id = job.get('job_id')
             if job_id is not None:
@@ -898,12 +898,14 @@ class ScoreHistory:
     def register_failure(self, event_time: datetime, job: Mapping[str, Any] | None = None) -> None:
         event = ensure_aware(event_time)
         self.failure_count += 1
-        self.last_ema_update_at = event
-        self.legacy_score = self._compute_legacy()
-        candidate = min(self.ema_score, self.legacy_score)
+        penalty = max(0.0, min(self.settings.failure_penalty_weight, 1.0))
+        penalized = self._clamp_score(self.ema_score * (1.0 - penalty))
+        self.ema_score = penalized
         if self.scores > 0.0:
-            candidate = min(self.scores, candidate)
-        self.scores = max(candidate, 0.0)
+            self.scores = min(self.scores, penalized)
+        else:
+            self.scores = penalized
+        self.last_ema_update_at = event
         if job is not None:
             job_id = job.get('job_id')
             if job_id is not None:
@@ -915,7 +917,6 @@ class ScoreHistory:
             {
                 'scores': float(self.scores),
                 'ema_score': float(self.ema_score),
-                'legacy_score': float(self.legacy_score),
                 'success_count': int(self.success_count),
                 'failure_count': int(self.failure_count),
                 'sample_count': int(self.sample_count),
@@ -931,11 +932,6 @@ class ScoreHistory:
     def to_record(self) -> 'ScoreRecord':
         return ScoreRecord(**self.to_payload())
 
-    def _compute_legacy(self) -> float:
-        base = float(self.success_count)
-        penalty = float(self.settings.failure_penalty_weight) * float(self.failure_count)
-        return self._clamp_non_negative(base - penalty)
-
     @classmethod
     def from_record(
         cls,
@@ -950,7 +946,6 @@ class ScoreHistory:
 
         scores = cls._coerce_float(payload.get('scores'), default=0.0)
         ema_score = cls._coerce_float(payload.get('ema_score'), default=scores)
-        legacy_score = cls._coerce_float(payload.get('legacy_score'), default=scores)
         success_count = cls._coerce_int(payload.get('success_count'), default=0)
         failure_count = cls._coerce_int(payload.get('failure_count'), default=0)
         sample_count = cls._coerce_int(payload.get('sample_count'), default=success_count)
@@ -963,7 +958,6 @@ class ScoreHistory:
             'scores',
             'is_slashed',
             'ema_score',
-            'legacy_score',
             'success_count',
             'failure_count',
             'sample_count',
@@ -973,6 +967,7 @@ class ScoreHistory:
             'failure_penalty_weight',
             'ema_alpha',
             'last_score_update_at',
+            'legacy_score',
         }
         extras = {key: value for key, value in payload.items() if key not in managed_keys}
 
@@ -982,7 +977,6 @@ class ScoreHistory:
             settings=normalized_settings,
             scores=cls._clamp_non_negative(scores),
             ema_score=cls._clamp_score(ema_score),
-            legacy_score=cls._clamp_non_negative(legacy_score),
             success_count=success_count,
             failure_count=failure_count,
             sample_count=sample_count,
@@ -1001,7 +995,6 @@ class ScoreHistory:
         if stored_alpha is not None:
             history.settings.ema_alpha = max(0.0, min(stored_alpha, 1.0))
         history.settings = history.settings.normalized()
-        history.legacy_score = history._compute_legacy()
         if history.scores == 0.0 and history.ema_score > 0.0:
             history.scores = history.ema_score
         return history
@@ -1020,7 +1013,6 @@ class ScoreHistory:
         history = cls.from_record(existing_record, settings=settings)
         history.scores = 0.0
         history.ema_score = 0.0
-        history.legacy_score = 0.0
         history.success_count = 0
         history.failure_count = 0
         history.sample_count = 0
@@ -1039,6 +1031,16 @@ class ScoreHistory:
             history.apply_decay(event_time)
             status = str(job.get('status', '')).lower()
             if status == 'success':
+                latency_ms = job_latency_ms(job)
+                if latency_ms is None:
+                    if logger is not None:
+                        logger.info(
+                            'score_history.missing_latency hotkey=%s job_id=%s',
+                            job.get('miner_hotkey'),
+                            job.get('job_id'),
+                        )
+                    history.register_failure(event_time, job=job)
+                    continue
                 try:
                     raw_score = score_fn(job)
                 except Exception as exc:
@@ -1154,9 +1156,9 @@ async def build_scores_from_state(
     score_fn: Callable[[Mapping[str, Any]], float] = job_to_weighted_score,
     job_filter: Callable[[Mapping[str, Any]], bool] | None = job_type_has_weight,
     fetch_concurrency: int = _HOTKEY_FETCH_CONCURRENCY,
-    ema_alpha: float = 1.0,
+    ema_alpha: float = 0.3,
     ema_half_life_seconds: float | None = None,
-    failure_penalty_weight: float = 0.2,
+    failure_penalty_weight: float = 0.7,
 ) -> ScoresResponse:
     if job_relay_client is None:
         raise ValueError("job_relay_client must be provided for score construction")

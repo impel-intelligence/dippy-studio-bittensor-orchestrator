@@ -52,6 +52,14 @@ orchestrator-restart:
 	docker compose --file docker-compose-local.yml restart orchestrator-dev
 	@echo "🔁 Restarted orchestrator-dev"
 
+# Drop into python-runner shell for ad-hoc scripts
+python-shell:
+	docker compose --file docker-compose-local.yml exec python-runner bash
+
+# Run a Python script in the python-runner container
+python-run script:
+	docker compose --file docker-compose-local.yml exec python-runner python {{script}}
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PRODUCTION
 # ═══════════════════════════════════════════════════════════════════════════

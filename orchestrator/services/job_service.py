@@ -8,7 +8,9 @@ import uuid
 import asyncio
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
+from pathlib import PurePosixPath
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
+from urllib.parse import urlparse
 
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient
 from orchestrator.common.datetime import parse_datetime, parse_timestamp, timestamp_to_iso
@@ -135,20 +137,28 @@ class JobService:
         return await self._fetch_job_record(job_id)
 
     async def fetch_masked_job_record(self, job_id: uuid.UUID) -> Dict[str, Any]:
-        """Return the job record with the prompt field hashed for privacy."""
+        """Return the job record with sensitive fields sanitized for privacy."""
 
         record = await self._fetch_job_record(job_id)
-        masked_record = deepcopy(record)
-        
-        # Hash the prompt in the payload if it exists
-        if "payload" in masked_record and isinstance(masked_record["payload"], dict):
-            payload = masked_record["payload"]
-            if "prompt" in payload:
-                prompt_value = payload["prompt"]
-                hashed = self._hash_value(prompt_value)
-                payload["prompt"] = hashed
-        
-        return masked_record
+        return self._sanitize_job_record(record)
+
+    async def list_recent_completed_job_records(
+        self,
+        *,
+        max_results: int = 1000,
+        lookback_days: float | int | None = None,
+    ) -> list[Dict[str, Any]]:
+        """Return sanitized recent completed jobs ordered by completion time."""
+
+        records = await self.list_recent_completed_jobs(
+            max_results=max_results,
+            lookback_days=lookback_days,
+        )
+        sanitized: list[Dict[str, Any]] = []
+        for record in records:
+            record_dict = record.model_dump(mode="json")
+            sanitized.append(self._sanitize_job_record(record_dict))
+        return sanitized
 
     async def get_job(self, job_id: uuid.UUID) -> Job:
         record = await self._fetch_job_record(job_id)
@@ -397,6 +407,48 @@ class JobService:
         text = str(value) if value is not None else ""
         digest = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
         return f"sha256:{digest}"
+
+    @staticmethod
+    def _is_callback_secret_field(key: Any) -> bool:
+        if not key or not isinstance(key, str):
+            return False
+        return key.lower() == "callback_secret"
+
+    @staticmethod
+    def _strip_image_filename(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        cleaned = value.split("?", 1)[0].split("#", 1)[0]
+        parsed = urlparse(cleaned)
+        candidate = parsed.path or cleaned
+        basename = PurePosixPath(candidate).name
+        return basename or cleaned
+
+    def _sanitize_job_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Hash prompts and strip image paths from a job record."""
+
+        def _sanitize_value(value: Any, *, key: str | None = None) -> Any:
+            key_lower = key.lower() if isinstance(key, str) else ""
+            if isinstance(value, dict):
+                return {
+                    child_key: _sanitize_value(child_value, key=child_key)
+                    for child_key, child_value in value.items()
+                    if not self._is_callback_secret_field(child_key)
+                }
+            if isinstance(value, list):
+                return [_sanitize_value(item, key=key) for item in value]
+            if key_lower and "prompt" in key_lower and "seed" not in key_lower:
+                return self._hash_value(value)
+            if key_lower and "image" in key_lower and ("url" in key_lower or "uri" in key_lower):
+                return self._strip_image_filename(value)
+            return value
+
+        sanitized: Dict[str, Any] = {}
+        for key, value in deepcopy(record).items():
+            if self._is_callback_secret_field(key):
+                continue
+            sanitized[key] = _sanitize_value(value, key=key)
+        return sanitized
 
     def _job_from_record(self, record: Dict[str, Any]) -> Job:
         job_id = self._parse_uuid(record.get("job_id")) or uuid.uuid4()

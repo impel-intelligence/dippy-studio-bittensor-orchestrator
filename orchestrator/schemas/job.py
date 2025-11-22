@@ -212,6 +212,11 @@ class CompletedJobsResponse(BaseModel):
     lookback_days: float
 
 
+class RecentJobsResponse(BaseModel):
+    jobs: List[Dict[str, Any]]
+    limit: int
+
+
 def _to_job_status(status: Any) -> JobStatus:
     if isinstance(status, JobStatus):
         return status
@@ -277,5 +282,6 @@ __all__ = [
     "InferenceJob",
     "JobRecord",
     "JobStatus",
+    "RecentJobsResponse",
     "VerificationStatus",
 ]
