@@ -4,8 +4,8 @@ from typing import Any, Mapping, Optional
 
 DEFAULT_MAX_LATENCY_MS = 60_000.0
 _JOB_TYPE_WEIGHTS: dict[str, float] = {
-    "img-h100_pcie": 0.6,
-    "base-h100_pcie": 0.4,
+    "img-h100_pcie": 0.7,
+    "base-h100_pcie": 0.3,
 }
 
 
