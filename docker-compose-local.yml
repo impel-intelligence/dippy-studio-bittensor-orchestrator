@@ -4,14 +4,15 @@ services:
     build:
       context: .
       dockerfile: orchestrator/orchestrator.dev.Dockerfile
-    command: python orchestrator/server.py --live-reload --port 42169
+    command: python orchestrator/server.py --live-reload --port ${ORCHESTRATOR_PORT:-8338}
     ports:
-      - "42169:42169"
+      - "${ORCHESTRATOR_PORT:-8338}:${ORCHESTRATOR_PORT:-8338}"
     volumes:
       - .:/app
       - ${HOME}/.bittensor:/home/appuser/.bittensor:ro
       - ./gcs_service_account.json:/app/gcs_service_account.json:ro
     environment:
+      - ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-8338}
       - EPISTULA_HOTKEY_PATH=/home/appuser/.bittensor/wallets/coldkey/hotkeys/hotkey
       - CALLBACK_GCS_BUCKET=${CALLBACK_GCS_BUCKET}
       - CALLBACK_GCS_PREFIX=${CALLBACK_GCS_PREFIX:-callbacks}
@@ -74,6 +75,21 @@ services:
         condition: service_healthy
       jobrelay:
         condition: service_started
+
+  stub-miner:
+    build:
+      context: .
+      dockerfile: orchestrator/orchestrator.dev.Dockerfile
+    command: uvicorn dev_scaffolding.stub_miner_server:app --host 0.0.0.0 --port ${STUB_MINER_PORT:-8765}
+    ports:
+      - "${STUB_MINER_PORT:-8765}:${STUB_MINER_PORT:-8765}"
+    volumes:
+      - .:/app
+    environment:
+      - STUB_MINER_IMAGE_PATH=${STUB_MINER_IMAGE_PATH:-/app/dev_scaffolding/assets/stub_miner_sample.png}
+      - STUB_MINER_OVERRIDE_CALLBACK_URL=${STUB_MINER_OVERRIDE_CALLBACK_URL}
+    env_file:
+      - .env
 
   postgres:
     image: postgres:18

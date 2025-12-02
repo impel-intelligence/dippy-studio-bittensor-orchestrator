@@ -168,6 +168,37 @@ class MinerRepository:
             records.append(record)
         return records
 
+    def increment_failure_count(self, hotkey: str, *, increment: int = 1) -> None:
+        step = max(1, int(increment or 0))
+        with self._database_service.cursor() as cur:
+            cur.execute(
+                "SELECT scores FROM miners WHERE hotkey = %s",
+                (hotkey,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                self._logger.debug(
+                    "miner_repository.increment_failure_count.missing hotkey=%s",
+                    hotkey,
+                )
+                return
+
+            current_payload = self._coerce_scores_payload(row[0])
+            current = self._failure_count_from_scores(current_payload)
+            updated = current + step
+            cur.execute(
+                """
+                UPDATE miners
+                SET scores = jsonb_set(
+                    COALESCE(scores, '{}'::jsonb),
+                    '{failure_count}',
+                    to_jsonb(%s::int)
+                )
+                WHERE hotkey = %s
+                """,
+                (updated, hotkey),
+            )
+
     def _miner_to_payload(self, miner: Miner) -> dict[str, object]:
         payload = dump_model(miner)
         payload.pop("failure_count", None)

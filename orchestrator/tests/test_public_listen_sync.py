@@ -16,6 +16,7 @@ from orchestrator.dependencies import (
 )
 from orchestrator.routes.public import LISTEN_AUTH_HEADER, LISTEN_AUTH_SECRET, create_public_router
 from orchestrator.services.job_service import JobWaitTimeoutError
+from sn_uuid import uuid7
 
 
 class StubStructuredLogger:
@@ -40,7 +41,6 @@ class StubListenService:
         job_type: JobType,
         payload: dict[str, object],
         desired_job_id: uuid.UUID | None,
-        slog: StubStructuredLogger,
     ) -> uuid.UUID:
         self.calls.append((job_type, payload, desired_job_id))
         return self.job_id
@@ -94,7 +94,7 @@ def _create_client(listen_service: StubListenService, job_service: StubJobServic
 
 
 def test_listen_sync_success_returns_job_payload() -> None:
-    job_id = uuid.uuid4()
+    job_id = uuid7()
     payload = {"result": "ok"}
     listen_service = StubListenService(job_id)
     job_service = StubJobService(_build_job(job_id, JobStatus.SUCCESS, payload=payload))
@@ -117,7 +117,7 @@ def test_listen_sync_success_returns_job_payload() -> None:
 
 
 def test_listen_sync_returns_504_on_timeout() -> None:
-    job_id = uuid.uuid4()
+    job_id = uuid7()
     listen_service = StubListenService(job_id)
     job_service = StubJobService(_build_job(job_id, JobStatus.PENDING), error=JobWaitTimeoutError("timeout"))
     config = _build_config(timeout_seconds=0.5, poll_interval_seconds=0.05)
@@ -134,7 +134,7 @@ def test_listen_sync_returns_504_on_timeout() -> None:
 
 
 def test_listen_sync_rejects_invalid_secret() -> None:
-    job_id = uuid.uuid4()
+    job_id = uuid7()
     listen_service = StubListenService(job_id)
     job_service = StubJobService(_build_job(job_id, JobStatus.SUCCESS, payload={"ok": True}))
     config = _build_config()

@@ -63,31 +63,46 @@ class MinerSelectionService:
     def _score_multiplier(self, miner: Miner, payload: Optional[Mapping[str, Any]]) -> float:
         if getattr(miner, "failed_audits", 0):
             return 0.0
+        failure_penalty = self._failure_penalty(getattr(miner, "failure_count", 0))
         if not payload:
-            return 1.0
-
-        def _coerce_float(value: Any) -> Optional[float]:
-            try:
-                if value is None:
+            base_multiplier = 1.0
+        else:
+            def _coerce_float(value: Any) -> Optional[float]:
+                try:
+                    if value is None:
+                        return None
+                    return float(value)
+                except (TypeError, ValueError):
                     return None
-                return float(value)
-            except (TypeError, ValueError):
-                return None
 
-        candidates = []
-        for key in ("ema_score", "scores"):
-            coerced = _coerce_float(payload.get(key))
-            if coerced is None:
-                continue
-            candidates.append(max(0.0, min(coerced, 1.0)))
+            candidates = []
+            for key in ("ema_score", "scores"):
+                coerced = _coerce_float(payload.get(key))
+                if coerced is None:
+                    continue
+                candidates.append(max(0.0, min(coerced, 1.0)))
 
-        if not candidates:
-            return 1.0
+            if not candidates:
+                base_multiplier = 1.0
+            else:
+                score_component = max(candidates)
+                if score_component <= 0.0:
+                    base_multiplier = self._score_floor
+                else:
+                    base_multiplier = max(self._score_floor, min(score_component, 1.0))
 
-        score_component = max(candidates)
-        if score_component <= 0.0:
-            return self._score_floor
-        return max(self._score_floor, min(score_component, 1.0))
+        base_multiplier = max(self._score_floor, base_multiplier)
+        penalized = base_multiplier * failure_penalty
+        return max(self._score_floor * failure_penalty, penalized)
+
+    @staticmethod
+    def _failure_penalty(failure_count: Any) -> float:
+        try:
+            count = int(failure_count)
+        except (TypeError, ValueError):
+            count = 0
+        count = max(0, count)
+        return 1.0 / (1.0 + count)
 
     def _clone_miner(self, miner: Miner) -> Miner:
         if hasattr(miner, "model_copy"):

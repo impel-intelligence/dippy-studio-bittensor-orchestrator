@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import uuid
 from datetime import datetime, timezone
 from typing import Iterator
 
@@ -15,6 +14,7 @@ from orchestrator.domain.miner import Miner
 from orchestrator.routes import create_internal_router, create_public_router, MinerUpsertRequest
 from orchestrator.clients.database import PostgresClient
 from orchestrator.services.score_service import ScoreRecord, ScoreService
+from sn_uuid import uuid7
 
 
 def _build_state() -> dict[str, Miner]:
@@ -38,7 +38,7 @@ def _resolve_base_dsn() -> str:
 
 def _create_temp_database(base_dsn: str) -> tuple[str, str, str]:
     params = conninfo_to_dict(base_dsn)
-    temp_db_name = f"test_{uuid.uuid4().hex}"
+    temp_db_name = f"test_{uuid7().hex}"
 
     admin_params = params.copy()
     admin_params["dbname"] = admin_params.get("maintenance_db") or "postgres"

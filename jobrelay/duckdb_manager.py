@@ -60,6 +60,7 @@ class JobRelayDuckDBManager:
     def __init__(self, settings: Settings):
         self._settings = settings
         self._db_path = settings.resolved_cache_db_path
+        self._skip_snapshot_io = False
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_conn = duckdb.connect(str(self._db_path))
         self._configure_connection()
@@ -156,6 +157,9 @@ class JobRelayDuckDBManager:
                 )
 
     def _maybe_restore_from_snapshot(self) -> None:
+        if self._skip_snapshot_io:
+            LOGGER.info("Snapshot restore skipped because snapshot IO is disabled")
+            return
         if not self._settings.gcs_bucket:
             raise ValueError("JOBRELAY_GCS_BUCKET must be configured for snapshot management")
         if self._has_existing_data():
@@ -403,6 +407,44 @@ class JobRelayDuckDBManager:
         )
         return result.fetchall()[0][0] if result.description else 0
 
+    def purge_local(self, *, skip_snapshots: bool = False) -> dict[str, object]:
+        """Clear local job state without touching remote snapshots."""
+
+        deleted_jobs = 0
+        try:
+            result = self._write_conn.execute("SELECT COUNT(*) FROM inference_jobs").fetchone()
+            if result is not None and result[0] is not None:
+                deleted_jobs = int(result[0])
+        except duckdb.Error:  # pragma: no cover - defensive
+            LOGGER.warning("Failed counting inference jobs before purge", exc_info=True)
+
+        try:
+            self._write_conn.execute("DELETE FROM inference_jobs")
+            self._write_conn.execute("DELETE FROM duckdb_sync_state")
+            self._write_conn.execute(
+                """
+                INSERT INTO duckdb_sync_state (id, last_snapshot)
+                VALUES (1, TIMESTAMPTZ '1970-01-01 00:00:00+00')
+                """
+            )
+            self._write_conn.execute("CHECKPOINT")
+            try:
+                self._write_conn.execute("VACUUM")
+            except duckdb.Error:  # pragma: no cover - VACUUM optional on versions without support
+                LOGGER.debug("VACUUM unsupported or failed during purge", exc_info=True)
+        except duckdb.Error as exc:  # pragma: no cover - severe failure path
+            LOGGER.exception("Failed purging local DuckDB state: %s", exc)
+            raise
+
+        if skip_snapshots:
+            self._skip_snapshot_io = True
+            LOGGER.info("Snapshot IO disabled after purge; remote snapshots preserved")
+
+        return {
+            "deleted_jobs": deleted_jobs,
+            "snapshots_disabled": self._skip_snapshot_io,
+        }
+
     def checkpoint(self) -> None:
         self._write_conn.execute("CHECKPOINT")
 
@@ -446,6 +488,9 @@ class JobRelayDuckDBManager:
         }
 
     def sync_to_gcs(self, snapshot_time: Optional[datetime] = None) -> Optional[str]:
+        if self._skip_snapshot_io:
+            LOGGER.info("Snapshot IO disabled; skipping sync to remote storage")
+            return None
         if not self._settings.gcs_bucket:
             raise ValueError("JOBRELAY_GCS_BUCKET must be configured for snapshot management")
 
@@ -777,6 +822,8 @@ class JobRelayDuckDBManager:
         since: datetime | None = None,
         job_id: str | None = None,
     ) -> List[Dict[str, object]]:
+        if self._skip_snapshot_io:
+            return []
         bucket = self._settings.gcs_bucket
         if not bucket:
             return []

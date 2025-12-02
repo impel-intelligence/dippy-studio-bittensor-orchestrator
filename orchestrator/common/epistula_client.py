@@ -8,11 +8,12 @@ import asyncio
 import hashlib
 import json
 import time
-import uuid
 from typing import Any, Optional, Tuple
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse, urljoin
+
+from sn_uuid import uuid7
 
 from epistula.epistula import load_keypair_from_env
 
@@ -54,7 +55,7 @@ class EpistulaClient:
             Tuple of (request body bytes, headers dict)
         """
         body = json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
-        request_uuid = str(uuid.uuid4())
+        request_uuid = str(uuid7())
         timestamp_ms = int(time.time() * 1000)
         digest = hashlib.sha256(body).hexdigest()
         message = f"{digest}.{request_uuid}.{timestamp_ms}.{miner_hotkey or ''}"

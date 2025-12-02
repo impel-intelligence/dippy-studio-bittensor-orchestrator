@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional
+from sn_uuid import uuid7
 
 
 __all__ = [
@@ -63,7 +64,7 @@ class Job:
 
     job_request: JobRequest
     hotkey: str
-    job_id: uuid.UUID = field(default_factory=uuid.uuid4)
+    job_id: uuid.UUID = field(default_factory=uuid7)
     status: JobStatus = JobStatus.PENDING
     job_response: Optional[JobResponse] = None
 
@@ -73,5 +74,6 @@ class Job:
     dispatched_at: Optional[float] = None
     failure_reason: Optional[str] = None
 
+    is_audit_job: bool = False
     audit_status: AuditStatus = AuditStatus.NOT_AUDITED
     audit_id: Optional[uuid.UUID] = None

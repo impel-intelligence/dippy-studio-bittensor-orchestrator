@@ -24,6 +24,7 @@ COPY pyproject.toml ./pyproject.toml
 COPY README.md ./README.md
 COPY orchestrator ./orchestrator
 COPY epistula ./epistula
+COPY sn_uuid ./sn_uuid
 
 ENV PYTHONPATH=/app
 
@@ -33,4 +34,4 @@ RUN groupadd --gid 1000 appuser && \
 
 USER appuser
 
-CMD ["uvicorn", "orchestrator.server:create_app", "--host", "0.0.0.0", "--port", "42169"]
+CMD ["sh", "-c", "uvicorn orchestrator.server:create_app --host 0.0.0.0 --port ${ORCHESTRATOR_PORT:-42169}"]

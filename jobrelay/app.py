@@ -126,6 +126,14 @@ def create_app() -> FastAPI:
         result = await processor_dep.nuclear_wipe()
         return {"status": "obliterated", **result}
 
+    @app.post("/purge-local", dependencies=[auth_dependency])
+    async def purge_local(
+        skip_snapshots: bool = Query(default=True, description="If true, skip snapshot IO after purge"),
+        processor_dep: BackgroundJobProcessor = Depends(get_processor_dependency),
+    ) -> Dict[str, object]:
+        result = await processor_dep.purge_local(skip_snapshots=skip_snapshots)
+        return {"status": "purged", **result}
+
     @app.get("/hotkeys/{hotkey}/jobs", dependencies=[auth_dependency])
     async def fetch_jobs_for_hotkey(
         hotkey: str,

@@ -30,6 +30,7 @@ from orchestrator.services.exceptions import (
     JobServiceError,
     JobValidationError,
 )
+from sn_uuid import uuid7
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ class JobService:
                 seed = secrets.randbelow(2**32)
             prepared_payload["seed"] = seed
 
-            job_identifier = job_id or uuid.uuid4()
+            job_identifier = job_id or uuid7()
             created_at = time.time()
 
             relay_payload = {
@@ -455,7 +456,7 @@ class JobService:
         return sanitized
 
     def _job_from_record(self, record: Dict[str, Any]) -> Job:
-        job_id = self._parse_uuid(record.get("job_id")) or uuid.uuid4()
+        job_id = self._parse_uuid(record.get("job_id")) or uuid7()
         job_type = self._parse_job_type(record.get("job_type"))
 
         request_payload = deepcopy(record.get("payload") or {})
@@ -501,6 +502,7 @@ class JobService:
             prepared_at=prepared_at,
             dispatched_at=dispatched_at,
             failure_reason=failure_reason,
+            is_audit_job=bool(record.get("is_audit_job")),
             audit_status=self._parse_audit_status(record.get("audit_status")),
             audit_id=audit_id,
         )

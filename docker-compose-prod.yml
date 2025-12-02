@@ -14,8 +14,9 @@ services:
       CALLBACK_GCS_CREDENTIALS: ${CALLBACK_GCS_CREDENTIALS:-/secrets/gcs_service_account.json}
       GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/secrets/gcs_service_account.json}
       EPISTULA_HOTKEY_PATH: ${EPISTULA_HOTKEY_PATH:-/home/appuser/.bittensor/wallets/coldkey/hotkeys/hotkey}
+      ORCHESTRATOR_PORT: ${ORCHESTRATOR_PORT:-42169}
     ports:
-      - "42169:42169"
+      - "${ORCHESTRATOR_PORT:-42169}:${ORCHESTRATOR_PORT:-42169}"
     depends_on:
       postgres:
         condition: service_healthy

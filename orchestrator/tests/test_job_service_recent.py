@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -14,6 +13,7 @@ from orchestrator.schemas.job import (
     JobStatus as SchemaJobStatus,
     VerificationStatus,
 )
+from sn_uuid import uuid7
 
 
 class _StubJobRelay:
@@ -34,7 +34,7 @@ def _make_record(
     hotkey: str,
 ) -> dict:
     return {
-        "job_id": str(uuid.uuid4()),
+        "job_id": str(uuid7()),
         "job_type": "generate",
         "miner_hotkey": hotkey,
         "payload": {"foo": "bar"},
@@ -83,7 +83,7 @@ async def test_list_recent_completed_jobs_skips_non_completed() -> None:
 def test_completed_job_summary_masks_prompts() -> None:
     now = datetime.now(timezone.utc)
     record = JobRecord(
-        job_id=uuid.uuid4(),
+        job_id=uuid7(),
         job_type="generate",
         miner_hotkey="hk-secret",
         payload={"prompt": "visible"},

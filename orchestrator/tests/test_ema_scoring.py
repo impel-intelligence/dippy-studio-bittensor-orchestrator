@@ -123,6 +123,24 @@ def test_score_history_failure_penalty_caps_score() -> None:
     assert history.scores == pytest.approx(expected_score, rel=1e-5)
 
 
+def test_score_history_marks_h100_latency_timeout_as_failure() -> None:
+    settings = ScoreSettings().normalized()
+    now = datetime.now(timezone.utc)
+    late_job = _make_success_job(now - timedelta(seconds=5), latency_ms=16_000)
+
+    history = ScoreHistory.from_jobs(
+        [late_job],
+        existing_record=None,
+        score_fn=job_to_weighted_score,
+        settings=settings,
+        reference_time=now,
+    )
+
+    assert history.success_count == 0
+    assert history.failure_count == 1
+    assert history.scores == 0.0
+
+
 class _DummyRelay:
     def __init__(self, jobs: Dict[str, List[Dict[str, Any]]]) -> None:
         self._jobs = jobs

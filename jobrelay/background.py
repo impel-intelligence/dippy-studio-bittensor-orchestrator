@@ -116,6 +116,17 @@ class BackgroundJobProcessor:
             self._repository.nuclear_wipe,
         )
 
+    async def purge_local(self, *, skip_snapshots: bool = False) -> Dict[str, object]:
+        """Clear local DuckDB state without deleting remote snapshots."""
+
+        await self.wait_for_idle()
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            self._repository.purge_local,
+            skip_snapshots,
+        )
+
     async def _worker_loop(self) -> None:
         loop = asyncio.get_running_loop()
         while True:

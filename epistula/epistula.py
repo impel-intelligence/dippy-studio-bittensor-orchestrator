@@ -13,9 +13,9 @@ import time
 import base58
 from typing import Dict, List, Optional
 from hashlib import blake2b, sha256
-import uuid as _uuid
 
 from loguru import logger
+from sn_uuid import uuid7
 
 
 class EpistulaVerifier:
@@ -141,7 +141,7 @@ class EpistulaVerifier:
         - `signed_by_keypair` must provide `.sign(str)->bytes` and `.ss58_address`.
         """
         timestamp = str(int(time.time() * 1000))
-        uuid_str = str(_uuid.uuid4())
+        uuid_str = str(uuid7())
         body_hash = sha256(body).hexdigest()
         message = f"{body_hash}.{uuid_str}.{timestamp}.{signed_for or ''}"
         signature = signed_by_keypair.sign(message)

@@ -69,16 +69,25 @@ async def _run_score(orchestrator: Orchestrator, trace_hotkeys: Sequence[str] | 
         summary.jobs_considered,
     )
 
-async def _run_audit_seed(orchestrator: Orchestrator) -> None:
+async def _run_audit_seed(
+    orchestrator: Orchestrator,
+    *,
+    preview_only: bool = False,
+    job_type: str | None = None,
+) -> None:
     WORKER_LOGGER.info(
-        "worker.audit_seed.start netuid=%s network=%s",
+        "worker.audit_seed.start netuid=%s network=%s job_type=%s",
         orchestrator.config.subnet.netuid,
         orchestrator.config.subnet.network,
+        job_type or "img-h100_pcie",
     )
     runner = AuditSeedRunner(
         audit_service=orchestrator.audit_service,
         netuid=orchestrator.config.subnet.netuid,
         network=orchestrator.config.subnet.network,
+        callback_url=orchestrator.config.callback.resolved_callback_url(),
+        preview_only=preview_only,
+        job_type=job_type,
         logger=orchestrator.server_context.logger,
     )
     summary = await runner.run_once()
@@ -114,6 +123,7 @@ async def _run_audit_check(orchestrator: Orchestrator, *, apply_changes: bool = 
         netuid=orchestrator.config.subnet.netuid,
         network=orchestrator.config.subnet.network,
         apply_changes=apply_changes,
+        audit_failure_repository=orchestrator.audit_failure_repository,
         logger=orchestrator.server_context.logger,
     )
     summary = await runner.run_once()
@@ -143,6 +153,8 @@ async def _run_targets(
     *,
     trace_hotkeys: Sequence[str] | None = None,
     audit_apply_changes: bool = False,
+    audit_seed_preview: bool = False,
+    audit_seed_job_type: str | None = None,
 ) -> None:
     for target in targets:
         normalized = target.strip().lower()
@@ -151,7 +163,11 @@ async def _run_targets(
         elif normalized == "score":
             await _run_score(orchestrator, trace_hotkeys=trace_hotkeys)
         elif normalized == "audit-seed":
-            await _run_audit_seed(orchestrator)
+            await _run_audit_seed(
+                orchestrator,
+                preview_only=audit_seed_preview,
+                job_type=audit_seed_job_type,
+            )
         elif normalized == "audit-check":
             await _run_audit_check(orchestrator, apply_changes=audit_apply_changes)
         elif normalized == "audit":
@@ -167,6 +183,8 @@ def run_targets(
     database_url: str | None = None,
     trace_hotkeys: Sequence[str] | None = None,
     audit_apply_changes: bool = False,
+    audit_seed_preview: bool = False,
+    audit_seed_job_type: str | None = None,
 ) -> None:
     sequence = list(targets)
     if not sequence:
@@ -182,6 +200,8 @@ def run_targets(
                 sequence,
                 trace_hotkeys=trace_hotkeys,
                 audit_apply_changes=audit_apply_changes,
+                audit_seed_preview=audit_seed_preview,
+                audit_seed_job_type=audit_seed_job_type,
             )
         )
     finally:

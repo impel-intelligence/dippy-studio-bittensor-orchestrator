@@ -48,6 +48,18 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Allow the audit check runner to persist miner validity changes (defaults to dry run)",
     )
+    parser.add_argument(
+        "--audit-preview",
+        dest="audit_preview",
+        action="store_true",
+        help="For audit-seed: preview candidates and stop before creating audit jobs",
+    )
+    parser.add_argument(
+        "--audit-job-type",
+        dest="audit_job_type",
+        default="img-h100_pcie",
+        help="For audit-seed: filter jobs by job_type (default: img-h100_pcie)",
+    )
     return parser.parse_args(argv)
 
 
@@ -103,6 +115,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             database_url=args.database_url,
             trace_hotkeys=trace_hotkeys or None,
             audit_apply_changes=args.audit_apply,
+            audit_seed_preview=args.audit_preview,
+            audit_seed_job_type=args.audit_job_type,
         )
     except Exception:
         logger.exception("runner.failed targets=%s", ",".join(targets))

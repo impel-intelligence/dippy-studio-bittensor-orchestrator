@@ -22,7 +22,7 @@ from orchestrator.services.job_service import JobService
 from orchestrator.services.miner_health_service import MinerHealthService
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.services.miner_selection_service import MinerSelectionService
-from orchestrator.repositories import MinerRepository
+from orchestrator.repositories import AuditFailureRepository, MinerRepository
 from orchestrator.services.score_service import ScoreService
 
 __all__ = ["orchestrator"]
@@ -65,6 +65,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
 
         self.epistula_client = EpistulaClient()
         self.miner_repository = MinerRepository(self.database_service)
+        self.audit_failure_repository = AuditFailureRepository(self.database_service)
         self.miner_health_service = MinerHealthService(
             repository=self.miner_repository,
             epistula_client=self.epistula_client,
@@ -169,6 +170,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             database_service=self.database_service,
             server_context=self.server_context,
             callback_service=self.callback_service,
+            audit_failure_repository=self.audit_failure_repository,
             job_service=self.job_service,
             job_relay_client=self.job_relay_client,
             config=self.config,
@@ -208,6 +210,7 @@ def create_app() -> FastAPI:
 
 
 if __name__ == "__main__":
+    default_port = int(os.getenv("ORCHESTRATOR_PORT", "8338"))
     parser = argparse.ArgumentParser(description="Orchestrator Service")
     parser.add_argument(
         "--live-reload",
@@ -217,8 +220,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--port",
         type=int,
-        default=42169,
-        help="Port to bind the server (default: 42169)",
+        default=default_port,
+        help="Port to bind the server (default comes from ORCHESTRATOR_PORT or 8338)",
     )
     
     args = parser.parse_args()

@@ -23,7 +23,14 @@ from orchestrator.common.datetime import ensure_aware, parse_datetime
 from orchestrator.common.model_utils import dump_model, validate_model
 from orchestrator.domain.miner import Miner
 from orchestrator.schemas.scores import ScorePayload, ScoreValue, ScoresResponse
-from orchestrator.services.job_scoring import job_latency_ms, job_to_weighted_score, job_type_has_weight
+from orchestrator.services.job_scoring import (
+    H100_KONTEXT_MAX_LATENCY_MS,
+    callback_latency_ms,
+    is_h100_kontext_job_type,
+    job_latency_ms,
+    job_to_weighted_score,
+    job_type_has_weight,
+)
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 
 if TYPE_CHECKING:
@@ -1031,6 +1038,22 @@ class ScoreHistory:
             history.apply_decay(event_time)
             status = str(job.get('status', '')).lower()
             if status == 'success':
+                callback_latency = callback_latency_ms(job)
+                if (
+                    is_h100_kontext_job_type(job.get('job_type'))
+                    and callback_latency is not None
+                    and callback_latency > H100_KONTEXT_MAX_LATENCY_MS
+                ):
+                    if logger is not None:
+                        logger.info(
+                            'score_history.latency_timeout hotkey=%s job_id=%s latency_ms=%s max_ms=%s',
+                            job.get('miner_hotkey'),
+                            job.get('job_id'),
+                            callback_latency,
+                            H100_KONTEXT_MAX_LATENCY_MS,
+                        )
+                    history.register_failure(event_time, job=job)
+                    continue
                 latency_ms = job_latency_ms(job)
                 if latency_ms is None:
                     if logger is not None:

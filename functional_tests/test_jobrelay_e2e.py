@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import os
 import time
-import uuid
 from typing import Callable, Dict, Optional, Tuple
 
 import httpx
 import pytest
+from sn_uuid import uuid7
 
 
 JOBRELAY_AUTH_HEADER = "X-Service-Auth-Secret"
@@ -59,7 +59,7 @@ def _wait_for_job(
 @pytest.mark.functional
 def test_jobrelay_end_to_end(jobrelay_client: Tuple[httpx.Client, Dict[str, str]]) -> None:
     client, headers = jobrelay_client
-    job_id = str(uuid.uuid4())
+    job_id = str(uuid7())
     miner_hotkey = "jobrelay-e2e-hotkey"
     payload = {
         "job_type": "inference",
@@ -109,6 +109,6 @@ def test_jobrelay_end_to_end(jobrelay_client: Tuple[httpx.Client, Dict[str, str]
     unauthorized = client.get(f"/jobs/{job_id}")
     assert unauthorized.status_code == 401
 
-    missing_job_id = str(uuid.uuid4())
+    missing_job_id = str(uuid7())
     not_found = client.get(f"/jobs/{missing_job_id}", headers=headers)
     assert not_found.status_code == 404

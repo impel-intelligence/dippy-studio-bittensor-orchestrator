@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from sn_uuid import uuid7
 
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient
 from orchestrator.common.job_store import Job, JobRequest, JobResponse, JobStatus, JobType
@@ -42,7 +43,7 @@ class FakeJobService(JobService):
 
 @pytest.mark.asyncio
 async def test_wait_for_terminal_state_success() -> None:
-    job_id = uuid.uuid4()
+    job_id = uuid7()
     service = FakeJobService(
         [JobStatus.PENDING, JobStatus.PENDING, JobStatus.SUCCESS],
     )
@@ -59,7 +60,7 @@ async def test_wait_for_terminal_state_success() -> None:
 
 @pytest.mark.asyncio
 async def test_wait_for_terminal_state_times_out() -> None:
-    job_id = uuid.uuid4()
+    job_id = uuid7()
     service = FakeJobService([JobStatus.PENDING])
 
     with pytest.raises(JobWaitTimeoutError):
@@ -72,7 +73,7 @@ async def test_wait_for_terminal_state_times_out() -> None:
 
 @pytest.mark.asyncio
 async def test_wait_for_terminal_state_cancelled() -> None:
-    job_id = uuid.uuid4()
+    job_id = uuid7()
     service = FakeJobService(
         [JobStatus.PENDING, JobStatus.PENDING, JobStatus.PENDING],
     )

@@ -28,21 +28,24 @@ _TASK_TYPE_PAYLOAD_OVERRIDES: dict[JobType, dict[str, str]] = {
 _KONTEXT_JOB_TYPES: frozenset[JobType] = frozenset({JobType.FLUX_KONTEXT})
 
 
-class ListenEngine:
+class ListenService:
     """Coordinate miner selection, job creation, and dispatch."""
 
     def __init__(
         self,
         job_service: JobService,
         metagraph: MinerMetagraphService,
+        logger: StructuredLogger,
         *,
-        epistula_client: EpistulaClient,
-        default_callback_url: str | None = None,
+        callback_url: Optional[str] = None,
+        keypair: Any | None = None,
+        epistula_client: EpistulaClient | None = None,
     ) -> None:
         self._job_service = job_service
         self._metagraph = metagraph
-        self._epistula_client = epistula_client
-        self._default_callback_url = default_callback_url.strip() if default_callback_url else None
+        self._logger = logger
+        self._epistula_client = epistula_client or EpistulaClient(keypair)
+        self._default_callback_url = callback_url.strip() if callback_url else None
 
     async def process(
         self,
@@ -50,15 +53,13 @@ class ListenEngine:
         job_type: JobType,
         payload: Any,
         desired_job_id: Optional[uuid.UUID],
-        slog: StructuredLogger,
     ) -> uuid.UUID:
-        miner = self._select_miner(job_type, slog)
+        miner = self._select_miner(job_type)
         job = await self._create_job(
             job_type=job_type,
             payload=payload,
             miner=miner,
             desired_job_id=desired_job_id,
-            slog=slog,
         )
 
         try:
@@ -68,20 +69,19 @@ class ListenEngine:
             await self._fail_job(
                 job.job_id,
                 f"prepare_failed:{type(exc).__name__}",
-                slog,
                 event="listen.prepare_failed",
                 error=str(exc),
             )
             return job.job_id
 
         await self._job_service.mark_job_prepared(job.job_id)
-        await self._dispatch(job, miner, inference_url, dispatch_payload, slog)
+        await self._dispatch(job, miner, inference_url, dispatch_payload)
         return job.job_id
 
-    def _select_miner(self, job_type: JobType, slog: StructuredLogger) -> Miner:
+    def _select_miner(self, job_type: JobType) -> Miner:
         miner = self._metagraph.fetch_candidate(task_type=job_type.value)
         if miner is None:
-            slog.error(
+            self._logger.error(
                 "listen.no_candidate",
                 job_type=str(job_type),
             )
@@ -95,7 +95,6 @@ class ListenEngine:
         payload: Any,
         miner: Miner,
         desired_job_id: Optional[uuid.UUID],
-        slog: StructuredLogger,
     ):
         job = await self._job_service.create_job(
             job_type=job_type,
@@ -103,7 +102,7 @@ class ListenEngine:
             hotkey=miner.hotkey,
             job_id=desired_job_id,
         )
-        slog.info(
+        self._logger.info(
             "job.created",
             job_id=str(job.job_id),
             job_type=str(job_type),
@@ -121,49 +120,50 @@ class ListenEngine:
         miner: Miner,
         inference_url: str,
         payload: dict[str, Any],
-        slog: StructuredLogger,
     ) -> None:
+        timeout = self._resolve_dispatch_timeout(getattr(job, "job_request", None))
         try:
             status_code, response_text = await self._epistula_client.post_signed_request(
                 url=inference_url,
                 payload=payload,
                 miner_hotkey=miner.hotkey,
+                timeout=timeout,
             )
         except urllib_error.URLError as exc:
             await self._fail_job(
                 job.job_id,
                 f"dispatch_error:{exc.reason or type(exc).__name__}",
-                slog,
                 event="listen.dispatch_error",
                 url=inference_url,
                 error=str(exc),
             )
+            self._record_request_failure(miner, reason="dispatch_error")
             return
         except Exception as exc:  # noqa: BLE001
             await self._fail_job(
                 job.job_id,
                 f"dispatch_error:{type(exc).__name__}",
-                slog,
                 event="listen.dispatch_error",
                 url=inference_url,
                 error=str(exc),
             )
+            self._record_request_failure(miner, reason="dispatch_error")
             return
 
         if status_code >= 400:
             await self._fail_job(
                 job.job_id,
                 f"dispatch_http_{status_code}",
-                slog,
                 event="listen.dispatch_failed",
                 url=inference_url,
                 status_code=status_code,
                 response_preview=response_text[:200],
             )
+            self._record_request_failure(miner, reason=f"dispatch_http_{status_code}")
             return
 
         await self._job_service.mark_job_dispatched(job.job_id)
-        slog.info(
+        self._logger.info(
             "listen.dispatch_success",
             job_id=str(job.job_id),
             url=inference_url,
@@ -175,28 +175,55 @@ class ListenEngine:
         self,
         job_id: uuid.UUID,
         reason: str,
-        slog: StructuredLogger,
         *,
         event: str,
         **log_fields: Any,
     ) -> None:
         await self._job_service.mark_job_failure(job_id, reason)
-        slog.error(
+        self._logger.error(
             event,
             job_id=str(job_id),
             reason=reason,
             **log_fields,
         )
 
+    def _record_request_failure(self, miner: Miner, *, reason: str) -> None:
+        hotkey = getattr(miner, "hotkey", None)
+        if not hotkey:
+            return
+        try:
+            self._metagraph.record_request_failure(hotkey)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            self._logger.debug(
+                "listen.record_request_failure_failed",
+                hotkey=hotkey,
+                reason=reason,
+                error=str(exc),
+            )
+
     def _resolve_inference_url(self, miner: Miner, job_type: JobType) -> str:
         address = (miner.network_address or "").strip()
-        endpoint = "/edit" if job_type in _KONTEXT_JOB_TYPES else "/inference"
+        # img-h100* jobs must hit the edit endpoint (including any string aliases)
+        job_type_value = job_type.value if isinstance(job_type, JobType) else str(job_type or "")
+        uses_edit = job_type in _KONTEXT_JOB_TYPES or "img-h100" in job_type_value.lower()
+        endpoint = "/edit" if uses_edit else "/inference"
 
         base = address.rstrip("/")
         if base.endswith(endpoint):
             return base or endpoint
 
         return f"{base}{endpoint}"
+
+    @staticmethod
+    def _resolve_dispatch_timeout(job_request: Any) -> int:
+        """Use longer HTTP timeouts for slower edit jobs."""
+        job_type_value = ""
+        if job_request is not None:
+            job_type_value = getattr(job_request, "job_type", "") or ""
+        job_type_str = job_type_value.value if isinstance(job_type_value, JobType) else str(job_type_value)
+        if "img-h100" in job_type_str.lower():
+            return 60
+        return 20
 
     def _build_dispatch_payload(self, job: Any) -> dict[str, Any]:
         if not hasattr(job, "job_request"):
@@ -246,37 +273,3 @@ class ListenEngine:
 
         for key, value in overrides.items():
             payload.setdefault(key, value)
-
-
-class ListenService:
-    """Backward-compatible facade over ListenEngine."""
-
-    def __init__(
-        self,
-        job_service: JobService,
-        metagraph: MinerMetagraphService,
-        callback_url: Optional[str] = None,
-        keypair: Any | None = None,
-    ) -> None:
-        epistula_client = EpistulaClient(keypair)
-        self._engine = ListenEngine(
-            job_service=job_service,
-            metagraph=metagraph,
-            epistula_client=epistula_client,
-            default_callback_url=callback_url,
-        )
-
-    async def process(
-        self,
-        *,
-        job_type: JobType,
-        payload: Any,
-        desired_job_id: Optional[uuid.UUID],
-        slog: StructuredLogger,
-    ) -> uuid.UUID:
-        return await self._engine.process(
-            job_type=job_type,
-            payload=payload,
-            desired_job_id=desired_job_id,
-            slog=slog,
-        )

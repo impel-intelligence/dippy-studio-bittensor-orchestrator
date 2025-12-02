@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
+
+from sn_uuid import uuid7
 
 import pytest
 
@@ -18,7 +19,7 @@ def _job_record(
 ) -> JobRecord:
     return JobRecord.model_validate(
         {
-            "job_id": uuid4(),
+            "job_id": uuid7(),
             "job_type": "generate",
             "miner_hotkey": miner_hotkey,
             "payload": {},

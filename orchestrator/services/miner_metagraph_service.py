@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import uuid
+import logging
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
@@ -10,6 +10,7 @@ from orchestrator.domain.miner import Miner
 from orchestrator.repositories import MinerRepository
 from orchestrator.services.miner_health_service import MinerHealthService
 from orchestrator.services.miner_selection_service import MinerSelectionService
+from sn_uuid import uuid7
 
 
 PLACEHOLDER_MINER = Miner(
@@ -36,7 +37,7 @@ class MinerMetagraphService:
         health_service: MinerHealthService | None = None,
         selection_service: MinerSelectionService | None = None,
     ) -> None:
-        self._instance_id = f"metagraph-{uuid.uuid4().hex}"
+        self._instance_id = f"metagraph-{uuid7().hex}"
         self._database_service = database_service
         self._repository = repository or MinerRepository(database_service)
         self._health_service = health_service or MinerHealthService(
@@ -46,6 +47,7 @@ class MinerMetagraphService:
         self._selection_service = selection_service or MinerSelectionService(self._repository)
         self._last_update: Optional[datetime] = None
         self._last_block: Optional[int] = None
+        self._logger = logging.getLogger(__name__)
 
     @property
     def instance_id(self) -> str:
@@ -106,6 +108,16 @@ class MinerMetagraphService:
         if deleted:
             self._last_update = datetime.now(timezone.utc)
         return deleted
+
+    def record_request_failure(self, hotkey: str, *, increment: int = 1) -> None:
+        try:
+            self._repository.increment_failure_count(hotkey, increment=increment)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            self._logger.debug(
+                "miner_metagraph.record_request_failure.failed",
+                exc_info=exc,
+                extra={"hotkey": hotkey},
+            )
 
 
 __all__ = ["MinerMetagraphService", "PLACEHOLDER_MINER"]

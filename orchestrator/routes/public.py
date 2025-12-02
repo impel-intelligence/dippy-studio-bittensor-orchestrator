@@ -14,6 +14,7 @@ from orchestrator.domain.miner import Miner
 from orchestrator.common.job_store import JobStatus, JobType
 from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.dependencies import (
+    get_audit_failure_repository,
     get_callback_service,
     get_config,
     get_health_service,
@@ -42,6 +43,7 @@ from orchestrator.services.exceptions import (
     JobServiceError,
     ListenServiceError,
 )
+from orchestrator.repositories import AuditFailureRecord, AuditFailureRepository
 
 
 LISTEN_AUTH_HEADER = "X-Service-Auth-Secret"
@@ -82,6 +84,26 @@ class CallbackResponse(BaseModel):
     message: str
 
 
+class AuditFailureEntry(BaseModel):
+    id: uuid.UUID
+    created_at: datetime
+    audit_job_id: uuid.UUID
+    target_job_id: Optional[uuid.UUID] = None
+    miner_hotkey: Optional[str] = None
+    netuid: Optional[int] = None
+    network: Optional[str] = None
+    audit_payload: Optional[dict[str, Any]] = None
+    audit_response_payload: Optional[dict[str, Any]] = None
+    target_payload: Optional[dict[str, Any]] = None
+    target_response_payload: Optional[dict[str, Any]] = None
+    audit_image_hash: Optional[str] = None
+    target_image_hash: Optional[str] = None
+
+
+class AuditFailuresResponse(BaseModel):
+    audit_failures: list[AuditFailureEntry]
+
+
 def create_public_router() -> APIRouter:
     router = APIRouter()
 
@@ -108,7 +130,6 @@ def create_public_router() -> APIRouter:
                 job_type=listen_request.job_type,
                 payload=listen_request.payload,
                 desired_job_id=listen_request.job_id,
-                slog=slog,
             )
         except ListenServiceError as exc:
             raise_listen_service_error(exc)
@@ -148,7 +169,6 @@ def create_public_router() -> APIRouter:
                 job_type=listen_request.job_type,
                 payload=listen_request.payload,
                 desired_job_id=listen_request.job_id,
-                slog=slog,
             )
         except ListenServiceError as exc:
             raise_listen_service_error(exc)
@@ -217,6 +237,19 @@ def create_public_router() -> APIRouter:
             status=job.status if isinstance(job.status, JobStatus) else JobStatus(str(job.status)),
             result=result_payload,
             failure_reason=job.failure_reason,
+        )
+
+    @router.get(
+        "/audit_failures",
+        response_model=AuditFailuresResponse,
+        status_code=status.HTTP_200_OK,
+    )
+    async def get_audit_failures(
+        repo: AuditFailureRepository = Depends(get_audit_failure_repository),
+    ) -> AuditFailuresResponse:
+        records = repo.list_recent(limit=100)
+        return AuditFailuresResponse(
+            audit_failures=[_record_to_entry(record) for record in records],
         )
 
     @router.get(
@@ -431,3 +464,21 @@ def create_public_router() -> APIRouter:
         return CallbackResponse(status=response_status, message=message)
 
     return router
+
+
+def _record_to_entry(record: AuditFailureRecord) -> AuditFailureEntry:
+    return AuditFailureEntry(
+        id=record.id,
+        created_at=record.created_at,
+        audit_job_id=record.audit_job_id,
+        target_job_id=record.target_job_id,
+        miner_hotkey=record.miner_hotkey,
+        netuid=record.netuid,
+        network=record.network,
+        audit_payload=record.audit_payload,
+        audit_response_payload=record.audit_response_payload,
+        target_payload=record.target_payload,
+        target_response_payload=record.target_response_payload,
+        audit_image_hash=record.audit_image_hash,
+        target_image_hash=record.target_image_hash,
+    )

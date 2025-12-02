@@ -10,9 +10,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from fastapi import UploadFile
 
-from orchestrator.common.job_store import JobStatus, JobType
+from orchestrator.common.job_store import JobStatus
 from orchestrator.clients.storage import BaseUploader
 from orchestrator.services.job_service import JobService
+from orchestrator.services.job_scoring import (
+    H100_KONTEXT_MAX_LATENCY_MS,
+    is_h100_kontext_job_type,
+)
 from orchestrator.services.exceptions import (
     CallbackImageError,
     CallbackImageUploadError,
@@ -26,11 +30,7 @@ CALLBACK_SECRET_HEADER = "X-Callback-Secret"
 
 logger = logging.getLogger(__name__)
 
-_FLUX_KONTEXT_JOB_TYPES = {
-    JobType.FLUX_KONTEXT.value,
-    "flux_kontext",
-}
-_FLUX_KONTEXT_MIN_RUNTIME_MS = 10_000
+_FLUX_KONTEXT_MIN_RUNTIME_MS = 8_000
 
 class CallbackService:
     def __init__(self, uploader: Optional[BaseUploader] = None) -> None:
@@ -56,6 +56,7 @@ class CallbackService:
             logger.exception("callback.job_fetch_failed job_id=%s", job_id)
             raise
 
+        is_audit_job = self._is_audit_job(job)
         job_type = self._extract_job_type(job)
 
         await self._verify_secret(job, provided_secret, job_service, job_uuid)
@@ -90,12 +91,21 @@ class CallbackService:
                 image_info["image_sha256"] = image_hash
 
         latencies = self._calculate_latencies(job, received_at)
-        await self._enforce_flux_kontext_runtime(
-            job_type=job_type,
-            total_runtime_ms=latencies.get("total_runtime_ms"),
-            job_service=job_service,
-            job_uuid=job_uuid,
-        )
+        latency_failure_reason: Optional[str] = None
+        if is_audit_job:
+            logger.info("callback.audit_job_validations_skipped job_id=%s", job_uuid)
+        else:
+            latency_failure_reason = self._detect_flux_kontext_latency_violation(
+                job_type=job_type,
+                dispatch_latency_ms=latencies.get("latency_ms"),
+                job_uuid=job_uuid,
+            )
+            await self._enforce_flux_kontext_runtime(
+                job_type=job_type,
+                total_runtime_ms=latencies.get("total_runtime_ms"),
+                job_service=job_service,
+                job_uuid=job_uuid,
+            )
         result_payload = self._compose_result_payload(
             status=status,
             error=error,
@@ -121,6 +131,7 @@ class CallbackService:
             job_uuid=job_uuid,
             status=status,
             error=error,
+            forced_failure_reason=latency_failure_reason,
         )
         message = f"Callback processed for job {updated_job.job_id}"
         return response_status, message
@@ -309,6 +320,29 @@ class CallbackService:
             "latency_ms": dispatch_latency_ms,
         }
 
+    def _detect_flux_kontext_latency_violation(
+        self,
+        *,
+        job_type: Optional[str],
+        dispatch_latency_ms: Optional[int],
+        job_uuid: uuid.UUID,
+    ) -> Optional[str]:
+        if not is_h100_kontext_job_type(job_type):
+            return None
+        if dispatch_latency_ms is None:
+            return None
+        if dispatch_latency_ms <= H100_KONTEXT_MAX_LATENCY_MS:
+            return None
+
+        logger.warning(
+            "callback.flux_kontext_latency_violation job_id=%s job_type=%s elapsed_ms=%s max_ms=%s",
+            job_uuid,
+            job_type,
+            dispatch_latency_ms,
+            H100_KONTEXT_MAX_LATENCY_MS,
+        )
+        return "flux_kontext_max_latency_violation"
+
     def _compose_result_payload(
         self,
         *,
@@ -349,18 +383,30 @@ class CallbackService:
         job_uuid: uuid.UUID,
         status: str,
         error: Optional[str],
+        forced_failure_reason: Optional[str] = None,
     ) -> str:
         normalized_status = status.strip().lower()
-        if normalized_status in {JobStatus.FAILED.value, "failed", "error"} or (error and error.strip()):
+        failure_reason = forced_failure_reason
+        if failure_reason is None and (
+            normalized_status in {JobStatus.FAILED.value, "failed", "error"} or (error and error.strip())
+        ):
+            failure_reason = f"callback_status:{status}"
+
+        if failure_reason is not None:
             logger.warning(
-                "callback.finalize_status_failure job_id=%s status=%s error=%s",
+                "callback.finalize_status_failure job_id=%s status=%s error=%s failure_reason=%s",
                 job_uuid,
                 status,
                 error,
+                failure_reason,
             )
-            await job_service.mark_job_failure(job_uuid, f"callback_status:{status}")
+            await job_service.mark_job_failure(job_uuid, failure_reason)
             return "error"
         return "success"
+
+    @staticmethod
+    def _is_audit_job(job: Any) -> bool:
+        return bool(getattr(job, "is_audit_job", False))
 
     def _parse_job_uuid(self, job_id: str) -> uuid.UUID:
         try:
@@ -398,10 +444,7 @@ class CallbackService:
         job_service: JobService,
         job_uuid: uuid.UUID,
     ) -> None:
-        if not job_type:
-            return
-        normalized = job_type.strip().lower()
-        if normalized not in _FLUX_KONTEXT_JOB_TYPES:
+        if not is_h100_kontext_job_type(job_type):
             return
         if total_runtime_ms is None:
             return

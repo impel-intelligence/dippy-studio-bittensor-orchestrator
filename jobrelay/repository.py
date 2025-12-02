@@ -45,6 +45,9 @@ class InferenceJobRepository:
     def checkpoint(self) -> None:
         self._manager.checkpoint()
 
+    def purge_local(self, skip_snapshots: bool = False) -> dict[str, object]:
+        return self._manager.purge_local(skip_snapshots=skip_snapshots)
+
     def close(self) -> None:
         self._manager.close()
 

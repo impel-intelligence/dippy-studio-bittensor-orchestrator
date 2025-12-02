@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from sn_uuid import uuid7
 
 from orchestrator.services.callback_service import CallbackService
 from orchestrator.clients.storage import BaseUploader
@@ -51,13 +52,14 @@ class _StubUploader(BaseUploader):
 
 class _FakeJob:
     def __init__(self) -> None:
-        self.job_id = uuid.uuid4()
+        self.job_id = uuid7()
         self.job_request = SimpleNamespace(
             timestamp=datetime.now(timezone.utc).timestamp(),
             job_type="generate",
         )
         self.dispatched_at = None
         self.callback_secret = "secret"
+        self.is_audit_job = False
 
 
 class _FakeJobService:
@@ -208,4 +210,91 @@ async def test_process_callback_allows_flux_kontext_runtime_after_threshold() ->
     )
 
     assert status == "success"
+    assert job_service.updated_payload is not None
+
+
+@pytest.mark.asyncio
+async def test_process_callback_marks_flux_kontext_latency_timeout_failed() -> None:
+    service = CallbackService()
+    job_service = _FakeJobService()
+    job_service.job.job_request.job_type = "img-h100_pcie"
+    received_at = datetime.now(timezone.utc)
+    job_service.job.job_request.timestamp = (received_at - timedelta(seconds=25)).timestamp()
+    job_service.job.dispatched_at = (received_at - timedelta(seconds=16)).timestamp()
+    job_id_str = str(job_service.job.job_id)
+
+    status, _ = await service.process_callback(
+        job_service=job_service,
+        job_id=job_id_str,
+        status="success",
+        completed_at=received_at.isoformat(),
+        error=None,
+        provided_secret="secret",
+        image=None,
+        received_at=received_at,
+    )
+
+    assert status == "error"
+    assert job_service.failures[-1] == "flux_kontext_max_latency_violation"
+    assert job_service.updated_payload is not None
+
+
+@pytest.mark.asyncio
+async def test_process_callback_allows_flux_kontext_latency_within_threshold() -> None:
+    service = CallbackService()
+    job_service = _FakeJobService()
+    job_service.job.job_request.job_type = "img-h100_pcie"
+    received_at = datetime.now(timezone.utc)
+    job_service.job.job_request.timestamp = (received_at - timedelta(seconds=20)).timestamp()
+    job_service.job.dispatched_at = (received_at - timedelta(seconds=10)).timestamp()
+    job_id_str = str(job_service.job.job_id)
+
+    status, _ = await service.process_callback(
+        job_service=job_service,
+        job_id=job_id_str,
+        status="success",
+        completed_at=received_at.isoformat(),
+        error=None,
+        provided_secret="secret",
+        image=None,
+        received_at=received_at,
+    )
+
+    assert status == "success"
+    assert not job_service.failures
+
+
+@pytest.mark.asyncio
+async def test_process_callback_skips_validations_for_audit_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = CallbackService()
+    job_service = _FakeJobService()
+    job_service.job.is_audit_job = True
+    job_service.job.job_request.job_type = "img-h100_pcie"
+    received_at = datetime.now(timezone.utc)
+    job_service.job.job_request.timestamp = (received_at - timedelta(seconds=2)).timestamp()
+    job_service.job.dispatched_at = (received_at - timedelta(seconds=20)).timestamp()
+    job_id_str = str(job_service.job.job_id)
+
+    def _fail_detect(self, *, job_type, dispatch_latency_ms, job_uuid):  # type: ignore[override]
+        raise AssertionError("latency validation should be skipped for audit jobs")
+
+    async def _fail_enforce(self, *, job_type, total_runtime_ms, job_service, job_uuid):  # type: ignore[override]
+        raise AssertionError("runtime validation should be skipped for audit jobs")
+
+    monkeypatch.setattr(CallbackService, "_detect_flux_kontext_latency_violation", _fail_detect)
+    monkeypatch.setattr(CallbackService, "_enforce_flux_kontext_runtime", _fail_enforce)
+
+    status, _ = await service.process_callback(
+        job_service=job_service,
+        job_id=job_id_str,
+        status="success",
+        completed_at=received_at.isoformat(),
+        error=None,
+        provided_secret="secret",
+        image=None,
+        received_at=received_at,
+    )
+
+    assert status == "success"
+    assert not job_service.failures
     assert job_service.updated_payload is not None
