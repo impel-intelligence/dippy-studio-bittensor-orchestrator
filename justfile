@@ -90,12 +90,17 @@ prod-logs:
 # WORKERS
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Run metagraph refresh worker once
+# Run metagraph refresh worker once (local stack)
 run-metagraph-once:
 	docker compose --file docker-compose-local.yml exec orchestrator-dev \
 		python -m orchestrator.workers metagraph
 
-# Run score ETL worker once
+# Run metagraph refresh worker once (prod stack)
+run-metagraph-once-prod:
+	docker compose --file docker-compose-prod.yml exec orchestrator \
+		python -m orchestrator.workers metagraph
+
+# Run score ETL worker once (local stack)
 run-score-etl-once hotkey='':
 	@if [ -n "{{hotkey}}" ]; then \
 		HOTKEY_FLAG="--hotkey {{hotkey}}"; \
@@ -103,6 +108,16 @@ run-score-etl-once hotkey='':
 		HOTKEY_FLAG=""; \
 	fi; \
 	docker compose --file docker-compose-local.yml exec orchestrator-dev \
+		python -m orchestrator.workers score $HOTKEY_FLAG
+
+# Run score ETL worker once (prod stack)
+run-score-etl-once-prod hotkey='':
+	@if [ -n "{{hotkey}}" ]; then \
+		HOTKEY_FLAG="--hotkey {{hotkey}}"; \
+	else \
+		HOTKEY_FLAG=""; \
+	fi; \
+	docker compose --file docker-compose-prod.yml exec orchestrator \
 		python -m orchestrator.workers score $HOTKEY_FLAG
 
 # Run audit seed worker once
@@ -129,9 +144,14 @@ run-audit-check-once apply='false':
 run-audit-once apply='false':
 	@just run-audit-check-once apply={{apply}}
 
-# Run all workers once (metagraph + score ETL)
+# Run all workers once (metagraph + score ETL) on local stack
 run-workers-once:
 	docker compose --file docker-compose-local.yml exec orchestrator-dev \
+		python -m orchestrator.workers all
+
+# Run all workers once (metagraph + score ETL) on prod stack
+run-workers-once-prod:
+	docker compose --file docker-compose-prod.yml exec orchestrator \
 		python -m orchestrator.workers all
 
 # ═══════════════════════════════════════════════════════════════════════════

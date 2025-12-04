@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import logging
-import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel
 
 from orchestrator.domain.miner import Miner
@@ -36,7 +35,7 @@ from orchestrator.schemas.scores import ScorePayload, ScoreValue, ScoresResponse
 from orchestrator.services.callback_service import CallbackService, CALLBACK_SECRET_HEADER
 from orchestrator.services.health_service import HealthService
 from orchestrator.services.job_service import JobService
-from orchestrator.services.listen_service import ListenService, SyncDispatchResult
+from orchestrator.services.listen_service import ListenService
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.services.score_service import ScoreService, build_scores_from_state
 from orchestrator.services.sync_waiter import SyncCallbackWaiter
@@ -71,13 +70,6 @@ DEBUG_CALLBACK_BASE = "https://orchestrator.dippy-bittensor-subnet.com"
 
 class ListenResponse(BaseModel):
     job_id: uuid.UUID
-
-
-class ListenSyncResponse(BaseModel):
-    job_id: uuid.UUID
-    status: JobStatus
-    result: Any | None = None
-    failure_reason: Optional[str] = None
 
 
 class CandidateSelection(BaseModel):
@@ -164,7 +156,7 @@ def create_public_router() -> APIRouter:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Invalid service auth secret",
-        )
+            )
 
         miner = listen_request.miner or stubbing.AUDIT_MINER
         payload = _override_callback_url(listen_request.payload)
@@ -177,201 +169,17 @@ def create_public_router() -> APIRouter:
 
         try:
             job_id = await listen_service.process(
-            job_type=listen_request.job_type,
-            payload=payload,
-            desired_job_id=listen_request.job_id,
-            override_miner=miner,
-        )
+                job_type=listen_request.job_type,
+                payload=payload,
+                desired_job_id=listen_request.job_id,
+                override_miner=miner,
+            )
         except ListenServiceError as exc:
             raise_listen_service_error(exc)
         except JobServiceError as exc:
             raise_job_service_error(exc)
 
         return ListenResponse(job_id=job_id)
-
-    @router.post(
-        "/listen/sync",
-        status_code=status.HTTP_200_OK,
-        responses={
-            200: {
-                "content": {"image/png": {}, "image/jpeg": {}, "application/json": {}},
-                "description": "Generated image or JSON payload",
-            },
-        },
-    )
-    async def listen_sync(
-        listen_request: ListenRequest,
-        request: Request,
-        listen_service: ListenService = Depends(get_listen_service),
-        config: OrchestratorConfig = Depends(get_config),
-        slog: StructuredLogger = Depends(get_structured_logger),
-    ) -> Response:
-        provided_secret = request.headers.get(LISTEN_AUTH_HEADER)
-        if provided_secret != LISTEN_AUTH_SECRET:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid service auth secret",
-            )
-
-        slog.info(
-            "listen.sync.start",
-            job_type=str(listen_request.job_type),
-        )
-
-        start_time = time.monotonic()
-        sync_cfg = config.listen.sync.normalized()
-        result: SyncDispatchResult = await listen_service.process_sync(
-            job_type=listen_request.job_type,
-            payload=listen_request.payload,
-            timeout_seconds=sync_cfg.timeout_seconds,
-            poll_interval_seconds=sync_cfg.poll_interval_seconds,
-            desired_job_id=listen_request.job_id,
-            is_disconnected=request.is_disconnected,
-        )
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-
-        if not result.success:
-            slog.warning(
-                "listen.sync.failed",
-                job_type=str(listen_request.job_type),
-                error=result.error,
-                status_code=result.status_code,
-                elapsed_ms=duration_ms,
-            )
-            # Use status code from miner if available, otherwise 502 Bad Gateway
-            error_status = result.status_code if result.status_code and result.status_code >= 400 else 502
-            raise HTTPException(
-                status_code=error_status,
-                detail=result.error or result.failure_reason or "Sync dispatch failed",
-            )
-
-        slog.info(
-            "listen.sync.completed",
-            job_type=str(listen_request.job_type),
-            job_id=result.job_id,
-            content_type=result.content_type,
-            job_status=str(result.job_status) if result.job_status else None,
-            response_size=len(result.image_bytes) if result.image_bytes else 0,
-            elapsed_ms=duration_ms,
-        )
-
-        headers = {}
-        if result.job_id:
-            headers["X-Job-ID"] = str(result.job_id)
-
-        if result.image_bytes is not None:
-            return Response(
-                content=result.image_bytes,
-                media_type=result.content_type or "application/octet-stream",
-                headers=headers,
-            )
-
-        payload = ListenSyncResponse(
-            job_id=result.job_id or listen_request.job_id or uuid.uuid4(),
-            status=result.job_status or JobStatus.PENDING,
-            result=result.result_payload,
-            failure_reason=result.failure_reason,
-        )
-        return Response(
-            content=payload.model_dump_json(),
-            media_type="application/json",
-            headers=headers,
-        )
-
-    @router.post(
-        "/debug/listen/sync",
-        status_code=status.HTTP_200_OK,
-        responses={
-            200: {
-                "content": {"image/png": {}, "image/jpeg": {}, "application/json": {}},
-                "description": "Generated image or JSON payload",
-            },
-        },
-    )
-    async def debug_listen_sync(
-        listen_request: DebugListenRequest,
-        request: Request,
-        listen_service: ListenService = Depends(get_listen_service),
-        config: OrchestratorConfig = Depends(get_config),
-        slog: StructuredLogger = Depends(get_structured_logger),
-    ) -> Response:
-        provided_secret = request.headers.get(LISTEN_AUTH_HEADER)
-        if provided_secret != LISTEN_AUTH_SECRET:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid service auth secret",
-            )
-
-        miner = listen_request.miner or stubbing.AUDIT_MINER
-        payload = _override_callback_url(listen_request.payload)
-        slog.info(
-            "debug.listen.sync.start",
-            job_type=str(listen_request.job_type),
-            miner_hotkey=getattr(miner, "hotkey", None),
-            miner_addr=getattr(miner, "network_address", None),
-        )
-
-        start_time = time.monotonic()
-        sync_cfg = config.listen.sync.normalized()
-        result: SyncDispatchResult = await listen_service.process_sync(
-            job_type=listen_request.job_type,
-            payload=payload,
-            timeout_seconds=sync_cfg.timeout_seconds,
-            poll_interval_seconds=sync_cfg.poll_interval_seconds,
-            desired_job_id=listen_request.job_id,
-            is_disconnected=None,  # allow long waits without client disconnect checks
-            override_miner=miner,
-        )
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-
-        if not result.success:
-            slog.warning(
-                "debug.listen.sync.failed",
-                job_type=str(listen_request.job_type),
-                error=result.error,
-                status_code=result.status_code,
-                elapsed_ms=duration_ms,
-                miner_hotkey=getattr(miner, "hotkey", None),
-            )
-            error_status = result.status_code if result.status_code and result.status_code >= 400 else 502
-            raise HTTPException(
-                status_code=error_status,
-                detail=result.error or result.failure_reason or "Sync dispatch failed",
-            )
-
-        slog.info(
-            "debug.listen.sync.completed",
-            job_type=str(listen_request.job_type),
-            job_id=result.job_id,
-            content_type=result.content_type,
-            job_status=str(result.job_status) if result.job_status else None,
-            response_size=len(result.image_bytes) if result.image_bytes else 0,
-            elapsed_ms=duration_ms,
-            miner_hotkey=getattr(miner, "hotkey", None),
-        )
-
-        headers = {}
-        if result.job_id:
-            headers["X-Job-ID"] = str(result.job_id)
-
-        if result.image_bytes is not None:
-            return Response(
-                content=result.image_bytes,
-                media_type=result.content_type or "application/octet-stream",
-                headers=headers,
-            )
-
-        payload = ListenSyncResponse(
-            job_id=result.job_id or listen_request.job_id or uuid.uuid4(),
-            status=result.job_status or JobStatus.PENDING,
-            result=result.result_payload,
-            failure_reason=result.failure_reason,
-        )
-        return Response(
-            content=payload.model_dump_json(),
-            media_type="application/json",
-            headers=headers,
-        )
 
     @router.get(
         "/audit_failures",

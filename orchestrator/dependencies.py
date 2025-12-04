@@ -157,7 +157,6 @@ def get_listen_service(
     config: OrchestratorConfig = Depends(get_config),
     slog: StructuredLogger = Depends(get_structured_logger),
     epistula_client: EpistulaClient = Depends(get_epistula_client),
-    sync_waiter: SyncCallbackWaiter = Depends(get_sync_callback_waiter),
 ) -> ListenService:
     return ListenService(
         job_service=job_service,
@@ -165,7 +164,6 @@ def get_listen_service(
         logger=slog,
         callback_url=config.callback.resolved_callback_url(),
         epistula_client=epistula_client,
-        sync_waiter=sync_waiter,
     )
 
 
