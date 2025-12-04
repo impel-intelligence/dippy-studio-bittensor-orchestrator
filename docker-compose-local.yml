@@ -21,6 +21,13 @@ services:
       - JOBRELAY_BASE_URL=${JOBRELAY_BASE_URL:-http://jobrelay:8181}
       - JOBRELAY_TIMEOUT_SECONDS=${JOBRELAY_TIMEOUT_SECONDS:-5}
       - DATABASE_URL=postgresql://orchestrator:orchestrator@postgres:5432/orchestrator
+      - LISTEN_SYNC_BACKEND=redis
+      - LISTEN_SYNC_REDIS_URL=redis://redis:6379/0
+      - LISTEN_SYNC_REDIS_CHANNEL_PREFIX=listen_sync
+      - LISTEN_SYNC_REDIS_TTL_SECONDS=600
+      - ENABLE_LOCAL_STUB_MINER=true
+      - LOCAL_STUB_MINER_URL=http://stub-miner:${STUB_MINER_PORT:-8765}
+      - LOCAL_STUB_MINER_HOTKEY=5EtM9iXMAYRsmt6aoQAoWNDX6yaBnjhmnEQhWKv8HpwkVtML
     env_file:
       - .env
     extra_hosts:
@@ -29,6 +36,8 @@ services:
       postgres:
         condition: service_healthy
       jobrelay:
+        condition: service_started
+      redis:
         condition: service_started
 
   jobrelay:
@@ -66,6 +75,13 @@ services:
       - JOBRELAY_BASE_URL=${JOBRELAY_BASE_URL:-http://jobrelay:8181}
       - JOBRELAY_TIMEOUT_SECONDS=${JOBRELAY_TIMEOUT_SECONDS:-5}
       - DATABASE_URL=postgresql://orchestrator:orchestrator@postgres:5432/orchestrator
+      - LISTEN_SYNC_BACKEND=redis
+      - LISTEN_SYNC_REDIS_URL=redis://redis:6379/0
+      - LISTEN_SYNC_REDIS_CHANNEL_PREFIX=listen_sync
+      - LISTEN_SYNC_REDIS_TTL_SECONDS=600
+      - ENABLE_LOCAL_STUB_MINER=true
+      - LOCAL_STUB_MINER_URL=http://stub-miner:${STUB_MINER_PORT:-8765}
+      - LOCAL_STUB_MINER_HOTKEY=5EtM9iXMAYRsmt6aoQAoWNDX6yaBnjhmnEQhWKv8HpwkVtML
     env_file:
       - .env
     extra_hosts:
@@ -75,21 +91,45 @@ services:
         condition: service_healthy
       jobrelay:
         condition: service_started
+      redis:
+        condition: service_started
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   stub-miner:
     build:
       context: .
       dockerfile: orchestrator/orchestrator.dev.Dockerfile
-    command: uvicorn dev_scaffolding.stub_miner_server:app --host 0.0.0.0 --port ${STUB_MINER_PORT:-8765}
+    command: python dippy-studio-bittensor-miner/reverse_proxy/server.py
     ports:
       - "${STUB_MINER_PORT:-8765}:${STUB_MINER_PORT:-8765}"
     volumes:
       - .:/app
     environment:
+      - PYTHONPATH=/app:/app/dippy-studio-bittensor-miner
+      - REVERSE_PROXY_CONFIG_PATH=/app/dippy-studio-bittensor-miner/reverse_proxy/config.local.json
+      - EMBED_STUB_MINER=true
+      - REVERSE_PROXY_HOST=0.0.0.0
+      - REVERSE_PROXY_PORT=${STUB_MINER_PORT:-8765}
+      - INFERENCE_SERVER_URL=http://127.0.0.1:${STUB_MINER_PORT:-8765}/stub
       - STUB_MINER_IMAGE_PATH=${STUB_MINER_IMAGE_PATH:-/app/dev_scaffolding/assets/stub_miner_sample.png}
       - STUB_MINER_OVERRIDE_CALLBACK_URL=${STUB_MINER_OVERRIDE_CALLBACK_URL}
     env_file:
       - .env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${STUB_MINER_PORT:-8765}/status"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
   postgres:
     image: postgres:18

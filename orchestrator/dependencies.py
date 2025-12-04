@@ -19,6 +19,7 @@ from orchestrator.services.health_service import HealthService
 from orchestrator.services.job_service import JobService
 from orchestrator.services.listen_service import ListenService
 from orchestrator.services.score_service import ScoreService
+from orchestrator.services.sync_waiter import SyncCallbackWaiter
 
 
 @dataclass
@@ -33,6 +34,7 @@ class DependencyRegistry:
     subnet_state_service: Optional[SubnetStateClient] = None
     score_service: Optional[ScoreService] = None
     epistula_client: Optional[EpistulaClient] = None
+    sync_callback_waiter: Optional[SyncCallbackWaiter] = None
     job_service: Optional[JobService] = None
 
 
@@ -59,6 +61,7 @@ def set_dependencies(
     subnet_state_service: Optional[SubnetStateClient] = None,
     score_service: Optional[ScoreService] = None,
     epistula_client: Optional[EpistulaClient] = None,
+    sync_callback_waiter: Optional[SyncCallbackWaiter] = None,
 ) -> None:
     """Set the global dependencies that will be injected into services."""
     if miner_metagraph_service is not None:
@@ -82,6 +85,8 @@ def set_dependencies(
         _registry.job_service = job_service
     if epistula_client is not None:
         _registry.epistula_client = epistula_client
+    if sync_callback_waiter is not None:
+        _registry.sync_callback_waiter = sync_callback_waiter
 
 
 def get_miner_metagraph_service() -> MinerMetagraphService:
@@ -117,11 +122,18 @@ def get_subnet_state_service() -> SubnetStateClient:
 def get_score_service() -> ScoreService:
     return _require("score_service", "ScoreService not initialized")  # type: ignore[return-value]
 
+def get_sync_callback_waiter() -> SyncCallbackWaiter:
+    if _registry.sync_callback_waiter is None:
+        _registry.sync_callback_waiter = SyncCallbackWaiter()
+    return _registry.sync_callback_waiter
 
-def get_callback_service() -> CallbackService:
+
+def get_callback_service(
+    sync_waiter: SyncCallbackWaiter = Depends(get_sync_callback_waiter),
+) -> CallbackService:
     if _registry.callback_service is not None:
         return _registry.callback_service
-    return CallbackService()
+    return CallbackService(sync_waiter=sync_waiter)
 
 
 def get_job_relay_client() -> BaseJobRelayClient:
@@ -145,6 +157,7 @@ def get_listen_service(
     config: OrchestratorConfig = Depends(get_config),
     slog: StructuredLogger = Depends(get_structured_logger),
     epistula_client: EpistulaClient = Depends(get_epistula_client),
+    sync_waiter: SyncCallbackWaiter = Depends(get_sync_callback_waiter),
 ) -> ListenService:
     return ListenService(
         job_service=job_service,
@@ -152,6 +165,7 @@ def get_listen_service(
         logger=slog,
         callback_url=config.callback.resolved_callback_url(),
         epistula_client=epistula_client,
+        sync_waiter=sync_waiter,
     )
 
 

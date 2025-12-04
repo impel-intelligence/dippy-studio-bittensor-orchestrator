@@ -13,6 +13,7 @@ from orchestrator.clients.storage import BaseUploader, GCSUploader
 from orchestrator.clients.subnet_state_client import SubnetStateClient
 from orchestrator.common.epistula_client import EpistulaClient
 from orchestrator.common.server_context import ServerContext
+from orchestrator.common.job_store import JobType
 from orchestrator.config import OrchestratorConfig, load_config
 from orchestrator.dependencies import set_dependencies
 from orchestrator.routes import create_internal_router, create_public_router
@@ -24,8 +25,13 @@ from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.services.miner_selection_service import MinerSelectionService
 from orchestrator.repositories import AuditFailureRepository, MinerRepository
 from orchestrator.services.score_service import ScoreService
+from orchestrator.domain.miner import Miner
+from orchestrator.services.sync_waiter import RedisSyncCallbackWaiter, SyncCallbackWaiter
 
 __all__ = ["orchestrator"]
+
+DEFAULT_LOCAL_STUB_MINER_URL = "http://stub-miner:8765"
+DEFAULT_LOCAL_STUB_HOTKEY = "5EtM9iXMAYRsmt6aoQAoWNDX6yaBnjhmnEQhWKv8HpwkVtML"
 
 
 class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
@@ -83,6 +89,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
         self.subnet_state_service = SubnetStateClient(network=self.network)
 
         self.server_context = ServerContext.default(service_name="orchestrator")
+        self._maybe_seed_local_stub_miner()
 
         callback_cfg = self.config.callback
         uploader: BaseUploader
@@ -115,7 +122,11 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             prefix=uploader_prefix,
             credentials=str(uploader_creds) if uploader_creds is not None else None,
         )
-        self.callback_service = CallbackService(uploader=self.callback_uploader)
+        self.sync_callback_waiter = self._build_sync_waiter()
+        self.callback_service = CallbackService(
+            uploader=self.callback_uploader,
+            sync_waiter=self.sync_callback_waiter,
+        )
 
         jobrelay_cfg = self.config.jobrelay
         if not jobrelay_cfg.is_enabled():
@@ -164,6 +175,99 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
         self.app = FastAPI(title="Orchestrator Service", version="0.0.1")
         self._setup_dependencies_and_routes()
 
+    def _build_sync_waiter(self) -> SyncCallbackWaiter:
+        """Select sync waiter backend based on configuration."""
+        sync_cfg = self.config.listen.sync
+        backend = (sync_cfg.backend or "memory").strip().lower()
+        if backend == "redis":
+            redis_url = sync_cfg.redis_url or os.getenv("LISTEN_SYNC_REDIS_URL")
+            if not redis_url:
+                self.server_context.logger.warning("sync_waiter.redis_url_missing fallback=memory")
+                return SyncCallbackWaiter()
+            try:
+                import redis.asyncio as redis_async  # type: ignore[import-not-found]
+
+                redis_client = redis_async.from_url(redis_url)
+                self.server_context.logger.info(
+                    "sync_waiter.backend_selected",
+                    backend="redis",
+                    redis_url=redis_url,
+                    prefix=sync_cfg.redis_channel_prefix,
+                    ttl_seconds=sync_cfg.redis_result_ttl_seconds,
+                )
+                return RedisSyncCallbackWaiter(
+                    redis_client,
+                    channel_prefix=sync_cfg.redis_channel_prefix,
+                    result_ttl_seconds=sync_cfg.redis_result_ttl_seconds,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                self.server_context.logger.warning(
+                    "sync_waiter.redis_init_failed",
+                    backend="redis",
+                    redis_url=redis_url,
+                    error=str(exc),
+                )
+                return SyncCallbackWaiter()
+
+        self.server_context.logger.info("sync_waiter.backend_selected", backend="memory")
+        return SyncCallbackWaiter()
+
+    @staticmethod
+    def _coerce_int(candidate: str | None, default: int) -> int:
+        try:
+            if candidate is None:
+                return default
+            return int(candidate)
+        except (TypeError, ValueError):
+            return default
+
+    def _maybe_seed_local_stub_miner(self) -> None:
+        enabled = os.getenv("ENABLE_LOCAL_STUB_MINER", "false").lower() in {"1", "true", "yes", "on"}
+        if not enabled:
+            return
+
+        base_url = os.getenv("LOCAL_STUB_MINER_URL", DEFAULT_LOCAL_STUB_MINER_URL).strip().rstrip("/")
+        hotkey = os.getenv("LOCAL_STUB_MINER_HOTKEY", DEFAULT_LOCAL_STUB_HOTKEY).strip()
+        uid = self._coerce_int(os.getenv("LOCAL_STUB_MINER_UID"), 4242)
+        alpha_stake = self._coerce_int(os.getenv("LOCAL_STUB_MINER_ALPHA"), 100_000)
+
+        capacity_override = os.getenv("LOCAL_STUB_MINER_CAPACITY")
+        if capacity_override:
+            capabilities = {
+                value.strip(): True
+                for value in capacity_override.split(",")
+                if value.strip()
+            }
+        else:
+            capabilities = {job_type.value: True for job_type in JobType}
+
+        miner = Miner(
+            uid=uid,
+            network_address=base_url,
+            valid=True,
+            alpha_stake=alpha_stake,
+            capacity=capabilities,
+            hotkey=hotkey,
+            failed_audits=0,
+            failure_count=0,
+        )
+
+        try:
+            self.miner_repository.upsert_miner(miner)
+            self.server_context.logger.info(
+                "dev.stub_miner_seeded",
+                url=base_url,
+                hotkey=hotkey,
+                capacity=list(capabilities.keys()),
+            )
+        except Exception as exc:  # noqa: BLE001 - defensive guard for dev helper
+            self.server_context.logger.error(
+                "dev.stub_miner_seed_failed",
+                url=base_url,
+                hotkey=hotkey,
+                error=str(exc),
+            )
+
     def _setup_dependencies_and_routes(self) -> None:  # noqa: D401 – helper method
         set_dependencies(
             miner_metagraph_service=self.miner_metagraph_service,
@@ -177,6 +281,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             subnet_state_service=self.subnet_state_service,
             score_service=self.score_service,
             epistula_client=self.epistula_client,
+            sync_callback_waiter=self.sync_callback_waiter,
         )
         self.app.include_router(create_internal_router())
         self.app.include_router(create_public_router())

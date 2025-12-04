@@ -37,3 +37,7 @@ listen:
   sync:
     timeout_seconds: 10.0
     poll_interval_seconds: 1.0
+    backend: memory
+    redis_url: null
+    redis_result_ttl_seconds: 600
+    redis_channel_prefix: listen_sync

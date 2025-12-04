@@ -13,6 +13,7 @@ from fastapi import UploadFile
 from orchestrator.common.job_store import JobStatus
 from orchestrator.clients.storage import BaseUploader
 from orchestrator.services.job_service import JobService
+from orchestrator.services.sync_waiter import SyncCallbackResult, SyncCallbackWaiter
 from orchestrator.services.job_scoring import (
     H100_KONTEXT_MAX_LATENCY_MS,
     is_h100_kontext_job_type,
@@ -33,8 +34,14 @@ logger = logging.getLogger(__name__)
 _FLUX_KONTEXT_MIN_RUNTIME_MS = 8_000
 
 class CallbackService:
-    def __init__(self, uploader: Optional[BaseUploader] = None) -> None:
+    def __init__(
+        self,
+        uploader: Optional[BaseUploader] = None,
+        *,
+        sync_waiter: Optional["SyncCallbackWaiter"] = None,
+    ) -> None:
         self._uploader = uploader or BaseUploader()
+        self._sync_waiter = sync_waiter
 
     async def process_callback(
         self,
@@ -133,8 +140,48 @@ class CallbackService:
             error=error,
             forced_failure_reason=latency_failure_reason,
         )
+
+        await self._notify_sync_waiter(
+            job_service=job_service,
+            job_uuid=job_uuid,
+            image_bytes=image_bytes,
+            image_content_type=image_content_type,
+        )
         message = f"Callback processed for job {updated_job.job_id}"
         return response_status, message
+
+    async def _notify_sync_waiter(
+        self,
+        *,
+        job_service: JobService,
+        job_uuid: uuid.UUID,
+        image_bytes: Optional[bytes],
+        image_content_type: Optional[str],
+    ) -> None:
+        if self._sync_waiter is None:
+            return
+        try:
+            final_job = await job_service.get_job(job_uuid)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("callback.sync_waiter.job_fetch_failed job_id=%s", job_uuid)
+            return
+
+        payload = getattr(getattr(final_job, "job_response", None), "payload", None)
+        failure_reason = getattr(final_job, "failure_reason", None)
+
+        result = SyncCallbackResult(
+            job_id=job_uuid,
+            status=final_job.status,
+            payload=payload,
+            image_bytes=image_bytes,
+            content_type=image_content_type,
+            failure_reason=failure_reason,
+            error=None,
+        )
+        try:
+            await self._sync_waiter.resolve(result)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("callback.sync_waiter.resolve_failed job_id=%s", job_uuid)
 
     async def _prepare_image(
         self,

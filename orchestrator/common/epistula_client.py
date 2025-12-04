@@ -172,3 +172,37 @@ class EpistulaClient:
             status_code = getattr(response, "status", response.getcode())
             response_text = response.read().decode("utf-8", errors="ignore")
             return status_code, response_text
+
+    async def post_signed_request_binary(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        miner_hotkey: Optional[str] = None,
+        timeout: int = 60,
+    ) -> Tuple[int, bytes, dict[str, str]]:
+        """Send a signed POST request and return binary response.
+        
+        Args:
+            url: The URL to send the request to
+            payload: The request payload
+            miner_hotkey: Optional miner hotkey to sign for
+            timeout: Request timeout in seconds
+            
+        Returns:
+            Tuple of (status code, response bytes, response headers dict)
+            
+        Raises:
+            urllib.error.URLError: For network errors
+            Exception: For other errors
+        """
+        body, headers = self.build_signed_request(payload, miner_hotkey)
+        
+        def _send() -> Tuple[int, bytes, dict[str, str]]:
+            req = urllib_request.Request(url, data=body, headers=headers, method="POST")
+            with urllib_request.urlopen(req, timeout=timeout) as response:
+                status_code = getattr(response, "status", response.getcode())
+                response_bytes = response.read()
+                response_headers = {k: v for k, v in response.getheaders()}
+                return status_code, response_bytes, response_headers
+        
+        return await asyncio.to_thread(_send)

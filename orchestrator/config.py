@@ -58,6 +58,10 @@ class CallbackConfig:
 class ListenSyncConfig:
     timeout_seconds: float = 10.0
     poll_interval_seconds: float = 1.0
+    backend: str = "memory"
+    redis_url: Optional[str] = None
+    redis_result_ttl_seconds: float = 600.0
+    redis_channel_prefix: str = "listen_sync"
 
     def normalized(self) -> "ListenSyncConfig":
         timeout = _maybe_float(self.timeout_seconds, 10.0) or 10.0
@@ -66,9 +70,18 @@ class ListenSyncConfig:
         poll = _maybe_float(self.poll_interval_seconds, 1.0) or 1.0
         if poll <= 0.0:
             poll = 0.1
+        ttl = _maybe_float(self.redis_result_ttl_seconds, 600.0) or 600.0
+        if ttl <= 0.0:
+            ttl = 60.0
+        backend = (self.backend or "memory").strip().lower()
+        channel_prefix = (self.redis_channel_prefix or "listen_sync").strip() or "listen_sync"
         return ListenSyncConfig(
             timeout_seconds=timeout,
             poll_interval_seconds=poll,
+            backend=backend,
+            redis_url=self.redis_url,
+            redis_result_ttl_seconds=ttl,
+            redis_channel_prefix=channel_prefix,
         )
 
 
@@ -190,10 +203,23 @@ class OrchestratorConfig:
         )
         if sync_poll is None:
             sync_poll = listen_defaults.poll_interval_seconds
+        backend_value = str(sync_data.get("backend", listen_defaults.backend) or listen_defaults.backend)
+        redis_url_value = sync_data.get("redis_url") or listen_defaults.redis_url
+        ttl_value = _maybe_float(
+            sync_data.get("redis_result_ttl_seconds"),
+            listen_defaults.redis_result_ttl_seconds,
+        )
+        if ttl_value is None:
+            ttl_value = listen_defaults.redis_result_ttl_seconds
+        prefix_value = sync_data.get("redis_channel_prefix", listen_defaults.redis_channel_prefix)
         listen = ListenConfig(
             sync=ListenSyncConfig(
                 timeout_seconds=sync_timeout,
                 poll_interval_seconds=sync_poll,
+                backend=backend_value,
+                redis_url=redis_url_value,
+                redis_result_ttl_seconds=ttl_value,
+                redis_channel_prefix=prefix_value,
             ).normalized()
         )
 
@@ -331,6 +357,21 @@ class OrchestratorConfig:
             )
             if maybe_poll is not None and maybe_poll > 0.0:
                 self.listen.sync.poll_interval_seconds = maybe_poll
+        if "LISTEN_SYNC_BACKEND" in env:
+            backend_override = env["LISTEN_SYNC_BACKEND"].strip()
+            if backend_override:
+                self.listen.sync.backend = backend_override.lower()
+        if "LISTEN_SYNC_REDIS_URL" in env:
+            url_override = env["LISTEN_SYNC_REDIS_URL"].strip()
+            self.listen.sync.redis_url = url_override or None
+        if "LISTEN_SYNC_REDIS_TTL_SECONDS" in env:
+            ttl_override = _maybe_float(env["LISTEN_SYNC_REDIS_TTL_SECONDS"], self.listen.sync.redis_result_ttl_seconds)
+            if ttl_override is not None and ttl_override > 0.0:
+                self.listen.sync.redis_result_ttl_seconds = ttl_override
+        if "LISTEN_SYNC_REDIS_CHANNEL_PREFIX" in env:
+            prefix_override = env["LISTEN_SYNC_REDIS_CHANNEL_PREFIX"].strip()
+            if prefix_override:
+                self.listen.sync.redis_channel_prefix = prefix_override
 
 
         if "EMA_ALPHA" in env:

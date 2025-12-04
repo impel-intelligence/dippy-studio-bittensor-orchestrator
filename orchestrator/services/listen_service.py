@@ -2,17 +2,33 @@ from __future__ import annotations
 
 import uuid
 from copy import deepcopy
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Optional
 from urllib import error as urllib_error
 
 from orchestrator.common.epistula_client import EpistulaClient
-from orchestrator.common.job_store import JobType
+from orchestrator.common.job_store import JobStatus, JobType
 from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.domain.miner import Miner
-from orchestrator.services.job_service import JobService
+from orchestrator.services.job_service import JobService, JobWaitCancelledError, JobWaitTimeoutError
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.services.exceptions import MinerSelectionError
+from orchestrator.services.sync_waiter import BaseSyncCallbackWaiter, SyncCallbackResult, SyncCallbackWaiter
 TEMP_OVERRIDE_STEPS = 10
+
+@dataclass
+class SyncDispatchResult:
+    """Result from a synchronous miner dispatch."""
+    success: bool
+    image_bytes: bytes | None = None
+    content_type: str | None = None
+    job_id: str | None = None
+    error: str | None = None
+    status_code: int | None = None
+    job_status: JobStatus | None = None
+    result_payload: Any | None = None
+    failure_reason: str | None = None
+
 
 _TASK_TYPE_PAYLOAD_OVERRIDES: dict[JobType, dict[str, str]] = {
     JobType.FLUX_DEV: {
@@ -40,12 +56,14 @@ class ListenService:
         callback_url: Optional[str] = None,
         keypair: Any | None = None,
         epistula_client: EpistulaClient | None = None,
+        sync_waiter: BaseSyncCallbackWaiter | None = None,
     ) -> None:
         self._job_service = job_service
         self._metagraph = metagraph
         self._logger = logger
         self._epistula_client = epistula_client or EpistulaClient(keypair)
         self._default_callback_url = callback_url.strip() if callback_url else None
+        self._sync_waiter = sync_waiter
 
     async def process(
         self,
@@ -53,8 +71,9 @@ class ListenService:
         job_type: JobType,
         payload: Any,
         desired_job_id: Optional[uuid.UUID],
+        override_miner: Optional[Miner] = None,
     ) -> uuid.UUID:
-        miner = self._select_miner(job_type)
+        miner = self._select_miner(job_type, override=override_miner)
         normalized_payload = self._apply_listen_payload_overrides(job_type, payload)
         job = await self._create_job(
             job_type=job_type,
@@ -79,7 +98,168 @@ class ListenService:
         await self._dispatch(job, miner, inference_url, dispatch_payload)
         return job.job_id
 
-    def _select_miner(self, job_type: JobType) -> Miner:
+    async def process_sync(
+        self,
+        *,
+        job_type: JobType,
+        payload: Any,
+        timeout_seconds: float,
+        poll_interval_seconds: float,
+        desired_job_id: Optional[uuid.UUID] = None,
+        is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
+        override_miner: Optional[Miner] = None,
+    ) -> SyncDispatchResult:
+        """Process a sync request by dispatching the classic /inference call and waiting for the callback."""
+        try:
+            miner = self._select_miner(job_type, override=override_miner)
+        except MinerSelectionError as exc:
+            self._logger.error(
+                "listen.sync.no_candidate",
+                job_type=str(job_type),
+                error=str(exc),
+            )
+            return SyncDispatchResult(
+                success=False,
+                error=f"Candidate miner not found: {exc}",
+                job_status=JobStatus.FAILED,
+            )
+
+        normalized_payload = self._apply_listen_payload_overrides(job_type, payload)
+        job = None
+        try:
+            job = await self._create_job(
+                job_type=job_type,
+                payload=normalized_payload,
+                miner=miner,
+                desired_job_id=desired_job_id,
+            )
+            dispatch_payload = self._build_dispatch_payload(job)
+            inference_url = self._resolve_inference_url(miner, job_type)
+        except Exception as exc:  # noqa: BLE001 - validation guard
+            job_id = getattr(job, "job_id", None)
+            if job_id:
+                await self._fail_job(
+                    job_id,
+                    f"prepare_failed:{type(exc).__name__}",
+                    event="listen.sync.prepare_failed",
+                    error=str(exc),
+                )
+            return SyncDispatchResult(
+                success=False,
+                error=f"prepare_failed:{type(exc).__name__}",
+                job_id=str(job_id) if job_id else None,
+                job_status=JobStatus.FAILED,
+            )
+
+        if self._sync_waiter is not None:
+            try:
+                await self._sync_waiter.register(job.job_id)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._logger.warning(
+                    "listen.sync.waiter_register_failed",
+                    job_id=str(job.job_id),
+                    error=str(exc),
+                )
+
+        await self._job_service.mark_job_prepared(job.job_id)
+
+        dispatched = await self._dispatch(job, miner, inference_url, dispatch_payload)
+        if not dispatched:
+            return SyncDispatchResult(
+                success=False,
+                job_id=str(job.job_id),
+                error="dispatch_failed",
+                job_status=JobStatus.FAILED,
+                status_code=502,
+            )
+
+        # Prefer the callback waiter bridge when available, otherwise fall back to polling jobrelay.
+        if self._sync_waiter is not None:
+            try:
+                callback_result: SyncCallbackResult = await self._sync_waiter.wait_for_result(
+                    job.job_id,
+                    timeout_seconds=timeout_seconds,
+                    poll_interval_seconds=poll_interval_seconds,
+                    is_disconnected=is_disconnected,
+                )
+            except JobWaitCancelledError as exc:
+                return SyncDispatchResult(
+                    success=False,
+                    job_id=str(job.job_id),
+                    error=str(exc),
+                    job_status=JobStatus.FAILED,
+                    status_code=499,
+                )
+            except JobWaitTimeoutError as exc:
+                return SyncDispatchResult(
+                    success=False,
+                    job_id=str(job.job_id),
+                    error=str(exc),
+                    job_status=JobStatus.TIMEOUT,
+                    status_code=504,
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._logger.error(
+                    "listen.sync.waiter_error",
+                    job_id=str(job.job_id),
+                    error=str(exc),
+                )
+                return SyncDispatchResult(
+                    success=False,
+                    job_id=str(job.job_id),
+                    error=f"sync_wait_error:{type(exc).__name__}",
+                    job_status=JobStatus.FAILED,
+                )
+
+            return SyncDispatchResult(
+                success=callback_result.status == JobStatus.SUCCESS,
+                image_bytes=callback_result.image_bytes,
+                content_type=callback_result.content_type,
+                job_id=str(callback_result.job_id),
+                status_code=200,
+                job_status=callback_result.status,
+                result_payload=callback_result.payload,
+                failure_reason=callback_result.failure_reason,
+                error=callback_result.error,
+            )
+
+        # Fallback: poll jobrelay for completion
+        try:
+            final_job = await self._job_service.wait_for_terminal_state(
+                job_id=job.job_id,
+                timeout_seconds=timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+                is_disconnected=is_disconnected,
+            )
+        except JobWaitCancelledError as exc:
+            return SyncDispatchResult(
+                success=False,
+                job_id=str(job.job_id),
+                error=str(exc),
+                job_status=JobStatus.FAILED,
+                status_code=499,
+            )
+        except JobWaitTimeoutError as exc:
+            return SyncDispatchResult(
+                success=False,
+                job_id=str(job.job_id),
+                error=str(exc),
+                job_status=JobStatus.TIMEOUT,
+                status_code=504,
+            )
+
+        return SyncDispatchResult(
+            success=final_job.status == JobStatus.SUCCESS,
+            job_id=str(final_job.job_id),
+            job_status=final_job.status,
+            result_payload=getattr(getattr(final_job, "job_response", None), "payload", None),
+            failure_reason=getattr(final_job, "failure_reason", None),
+        )
+
+    def _select_miner(self, job_type: JobType, override: Optional[Miner] = None) -> Miner:
+        if override is not None:
+            return override
+
         miner = self._metagraph.fetch_candidate(task_type=job_type.value)
         if miner is None:
             self._logger.error(
@@ -121,7 +301,7 @@ class ListenService:
         miner: Miner,
         inference_url: str,
         payload: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         timeout = self._resolve_dispatch_timeout(getattr(job, "job_request", None))
         try:
             status_code, response_text = await self._epistula_client.post_signed_request(
@@ -139,7 +319,7 @@ class ListenService:
                 error=str(exc),
             )
             self._record_request_failure(miner, reason="dispatch_error")
-            return
+            return False
         except Exception as exc:  # noqa: BLE001
             await self._fail_job(
                 job.job_id,
@@ -149,7 +329,7 @@ class ListenService:
                 error=str(exc),
             )
             self._record_request_failure(miner, reason="dispatch_error")
-            return
+            return False
 
         if status_code >= 400:
             await self._fail_job(
@@ -161,7 +341,7 @@ class ListenService:
                 response_preview=response_text[:200],
             )
             self._record_request_failure(miner, reason=f"dispatch_http_{status_code}")
-            return
+            return False
 
         await self._job_service.mark_job_dispatched(job.job_id)
         self._logger.info(
@@ -171,6 +351,7 @@ class ListenService:
             status_code=status_code,
             response_preview=response_text[:200],
         )
+        return True
 
     async def _fail_job(
         self,
@@ -202,11 +383,15 @@ class ListenService:
                 error=str(exc),
             )
 
-    def _resolve_inference_url(self, miner: Miner, job_type: JobType) -> str:
+    def _resolve_inference_url(self, miner: Miner, job_type: JobType, *, sync: bool = False) -> str:
         address = (miner.network_address or "").strip()
         # img-h100* jobs must hit the edit endpoint (including any string aliases)
         uses_edit = self._is_kontext_job_type(job_type)
-        endpoint = "/edit" if uses_edit else "/inference"
+
+        if sync:
+            endpoint = "/sync/edit" if uses_edit else "/sync/inference"
+        else:
+            endpoint = "/edit" if uses_edit else "/inference"
 
         base = address.rstrip("/")
         if base.endswith(endpoint):

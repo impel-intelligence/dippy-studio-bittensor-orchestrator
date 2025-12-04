@@ -15,21 +15,21 @@ default:
 up:
 	docker compose --file docker-compose-local.yml up -d --build
 	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-42169} (Docker)"
-	@echo "🧪 Stub miner available at http://localhost:${STUB_MINER_PORT:-8765}"
+	@echo "🧪 Stub miner proxy running at http://localhost:${STUB_MINER_PORT:-8765}"
 	@echo "   View logs: just devlogs or just orclogs"
 
 # Start local dev stack without rebuilding
 local:
 	docker compose --file docker-compose-local.yml up -d
 	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-42169} (Docker)"
-	@echo "🧪 Stub miner available at http://localhost:${STUB_MINER_PORT:-8765}"
+	@echo "🧪 Stub miner proxy running at http://localhost:${STUB_MINER_PORT:-8765}"
 	@echo "   View logs: just devlogs or just orclogs"
 
 # Rebuild and restart only the orchestrator-dev service
 local-rebuild:
 	docker compose --file docker-compose-local.yml up -d --build orchestrator-dev
 	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-42169} (Docker)"
-	@echo "🧪 Stub miner available at http://localhost:${STUB_MINER_PORT:-8765}"
+	@echo "🧪 Stub miner proxy running at http://localhost:${STUB_MINER_PORT:-8765}"
 	@echo "   View logs: just devlogs or just orclogs"
 
 # Stop the local dev stack
@@ -84,7 +84,7 @@ prod-down:
 
 # Tail logs for prod stack
 prod-logs:
-	docker compose --file docker-compose-prod.yml logs -f orchestrator-prod jobrelay-prod
+	docker compose --file docker-compose-prod.yml logs -f orchestrator jobrelay redis
 
 # ═══════════════════════════════════════════════════════════════════════════
 # WORKERS

@@ -11,6 +11,10 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://orchestrator:orchestrator@postgres:5432/orchestrator}
       JOBRELAY_BASE_URL: ${JOBRELAY_BASE_URL:-http://jobrelay:8181}
       JOBRELAY_TIMEOUT_SECONDS: ${JOBRELAY_TIMEOUT_SECONDS:-5}
+      LISTEN_SYNC_BACKEND: ${LISTEN_SYNC_BACKEND:-redis}
+      LISTEN_SYNC_REDIS_URL: ${LISTEN_SYNC_REDIS_URL:-redis://redis:6379/0}
+      LISTEN_SYNC_REDIS_CHANNEL_PREFIX: ${LISTEN_SYNC_REDIS_CHANNEL_PREFIX:-listen_sync}
+      LISTEN_SYNC_REDIS_TTL_SECONDS: ${LISTEN_SYNC_REDIS_TTL_SECONDS:-600}
       CALLBACK_GCS_CREDENTIALS: ${CALLBACK_GCS_CREDENTIALS:-/secrets/gcs_service_account.json}
       GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/secrets/gcs_service_account.json}
       EPISTULA_HOTKEY_PATH: ${EPISTULA_HOTKEY_PATH:-/home/appuser/.bittensor/wallets/coldkey/hotkeys/hotkey}
@@ -22,6 +26,8 @@ services:
         condition: service_healthy
       jobrelay:
         condition: service_started
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     volumes:
       - orchestrator_data:/var/lib/orchestrator
@@ -59,6 +65,18 @@ services:
         source: ${GCS_CREDENTIALS_FILE:-./gcs_service_account.json}
         target: /secrets/gcs_service_account.json
         read_only: true
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
   postgres:
     image: postgres:18
