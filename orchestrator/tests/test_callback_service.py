@@ -50,12 +50,47 @@ class _StubUploader(BaseUploader):
         return self._uri
 
 
+class _StubWebhookDispatcher:
+    def __init__(self, *, succeed: bool = True) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.succeed = succeed
+
+    def dispatch(
+        self,
+        *,
+        webhook_url: str,
+        job_id: str,
+        status: str,
+        completed_at: str,
+        error: str | None,
+        latencies: dict,
+        image_bytes: bytes | None,
+        image_filename: str | None,
+        image_content_type: str | None,
+    ) -> bool:
+        self.calls.append(
+            {
+                "webhook_url": webhook_url,
+                "job_id": job_id,
+                "status": status,
+                "completed_at": completed_at,
+                "error": error,
+                "latencies": latencies,
+                "has_image": image_bytes is not None,
+                "image_filename": image_filename,
+                "image_content_type": image_content_type,
+            }
+        )
+        return self.succeed
+
+
 class _FakeJob:
-    def __init__(self) -> None:
+    def __init__(self, payload: dict | None = None) -> None:
         self.job_id = uuid7()
         self.job_request = SimpleNamespace(
             timestamp=datetime.now(timezone.utc).timestamp(),
             job_type="generate",
+            payload=payload or {},
         )
         self.dispatched_at = None
         self.callback_secret = "secret"
@@ -63,8 +98,8 @@ class _FakeJob:
 
 
 class _FakeJobService:
-    def __init__(self) -> None:
-        self.job = _FakeJob()
+    def __init__(self, job: _FakeJob | None = None) -> None:
+        self.job = job or _FakeJob()
         self.updated_payload: dict | None = None
         self.failures: list[str] = []
         self.audit_called = False
@@ -116,6 +151,56 @@ async def test_process_callback_appends_image_hash(monkeypatch: pytest.MonkeyPat
     assert job_service.updated_payload is not None
     assert job_service.updated_payload.get("image_sha256") == expected_hash
     assert uploader.calls and uploader.calls[-1]["job_type"] == "generate"
+
+
+@pytest.mark.asyncio
+async def test_process_callback_forwards_to_webhook_when_present() -> None:
+    dispatcher = _StubWebhookDispatcher()
+    service = CallbackService(webhook_dispatcher=dispatcher)
+    job = _FakeJob(payload={"webhook_url": "https://example.com/webhook"})
+    job_service = _FakeJobService(job=job)
+    job_id_str = str(job_service.job.job_id)
+
+    image = _FakeUploadFile(b"content-bytes", filename="image.png", content_type="image/png")
+
+    status, _ = await service.process_callback(
+        job_service=job_service,
+        job_id=job_id_str,
+        status="success",
+        completed_at=datetime.now(timezone.utc).isoformat(),
+        error=None,
+        provided_secret="secret",
+        image=image,
+        received_at=datetime.now(timezone.utc),
+    )
+
+    assert status == "success"
+    assert dispatcher.calls and dispatcher.calls[-1]["webhook_url"] == "https://example.com/webhook"
+    assert job_service.updated_payload is not None
+    assert job_service.updated_payload["callback_metadata"]["webhook_forwarded"] is True
+
+
+@pytest.mark.asyncio
+async def test_process_callback_marks_webhook_forward_false_when_missing_dispatcher() -> None:
+    service = CallbackService(webhook_dispatcher=None)
+    job = _FakeJob(payload={"webhook_url": "https://example.com/webhook"})
+    job_service = _FakeJobService(job=job)
+    job_id_str = str(job_service.job.job_id)
+
+    status, _ = await service.process_callback(
+        job_service=job_service,
+        job_id=job_id_str,
+        status="success",
+        completed_at=datetime.now(timezone.utc).isoformat(),
+        error=None,
+        provided_secret="secret",
+        image=None,
+        received_at=datetime.now(timezone.utc),
+    )
+
+    assert status == "success"
+    assert job_service.updated_payload is not None
+    assert job_service.updated_payload["callback_metadata"]["webhook_forwarded"] is False
 
 
 class _MockResponse:

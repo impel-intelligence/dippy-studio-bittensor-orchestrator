@@ -58,7 +58,7 @@ class CallbackConfig:
 class ListenSyncConfig:
     timeout_seconds: float = 10.0
     poll_interval_seconds: float = 1.0
-    backend: str = "memory"
+    backend: str = "redis"
     redis_url: Optional[str] = None
     redis_result_ttl_seconds: float = 600.0
     redis_channel_prefix: str = "listen_sync"
@@ -73,7 +73,9 @@ class ListenSyncConfig:
         ttl = _maybe_float(self.redis_result_ttl_seconds, 600.0) or 600.0
         if ttl <= 0.0:
             ttl = 60.0
-        backend = (self.backend or "memory").strip().lower()
+        backend = (self.backend or "redis").strip().lower()
+        if backend != "redis":
+            raise ValueError(f"Unsupported listen sync backend: {backend}")
         channel_prefix = (self.redis_channel_prefix or "listen_sync").strip() or "listen_sync"
         return ListenSyncConfig(
             timeout_seconds=timeout,
@@ -360,7 +362,10 @@ class OrchestratorConfig:
         if "LISTEN_SYNC_BACKEND" in env:
             backend_override = env["LISTEN_SYNC_BACKEND"].strip()
             if backend_override:
-                self.listen.sync.backend = backend_override.lower()
+                backend_value = backend_override.lower()
+                if backend_value != "redis":
+                    raise ValueError(f"Unsupported listen sync backend override: {backend_override}")
+                self.listen.sync.backend = backend_value
         if "LISTEN_SYNC_REDIS_URL" in env:
             url_override = env["LISTEN_SYNC_REDIS_URL"].strip()
             self.listen.sync.redis_url = url_override or None

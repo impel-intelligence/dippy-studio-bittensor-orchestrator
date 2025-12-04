@@ -18,6 +18,7 @@ from orchestrator.services.job_scoring import (
     H100_KONTEXT_MAX_LATENCY_MS,
     is_h100_kontext_job_type,
 )
+from orchestrator.services.webhook_dispatcher import WebhookDispatcher
 from orchestrator.services.exceptions import (
     CallbackImageError,
     CallbackImageUploadError,
@@ -39,9 +40,11 @@ class CallbackService:
         uploader: Optional[BaseUploader] = None,
         *,
         sync_waiter: Optional["SyncCallbackWaiter"] = None,
+        webhook_dispatcher: Optional[WebhookDispatcher] = None,
     ) -> None:
         self._uploader = uploader or BaseUploader()
         self._sync_waiter = sync_waiter
+        self._webhook_dispatcher = webhook_dispatcher
 
     async def process_callback(
         self,
@@ -113,6 +116,18 @@ class CallbackService:
                 job_service=job_service,
                 job_uuid=job_uuid,
             )
+        webhook_url = self._extract_webhook_url(job)
+        webhook_forwarded = self._forward_to_webhook(
+            webhook_url=webhook_url,
+            job_id=job_id,
+            status=status,
+            completed_at=completed_at,
+            error=error,
+            latencies=latencies,
+            image_bytes=image_bytes,
+            image_filename=image_filename,
+            image_content_type=image_content_type,
+        )
         result_payload = self._compose_result_payload(
             status=status,
             error=error,
@@ -121,6 +136,7 @@ class CallbackService:
             latencies=latencies,
             image_info=image_info,
             provided_secret=provided_secret,
+            webhook_forwarded=webhook_forwarded,
         )
 
         updated_job = await job_service.update_job(job_uuid, result_payload)
@@ -400,6 +416,7 @@ class CallbackService:
         latencies: Dict[str, Optional[int]],
         image_info: Dict[str, Any],
         provided_secret: Optional[str],
+        webhook_forwarded: bool = False,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "status": status,
@@ -416,11 +433,13 @@ class CallbackService:
         if image_info.get("image_uri"):
             payload.update(image_info)
 
-        payload["callback_metadata"] = {
+        callback_metadata = {
             "has_image": bool(image_info.get("image_uri")),
             "secret_verified": True,
             "secret_provided": bool(provided_secret),
         }
+        callback_metadata["webhook_forwarded"] = webhook_forwarded
+        payload["callback_metadata"] = callback_metadata
         return payload
 
     async def _finalize_status(
@@ -507,6 +526,76 @@ class CallbackService:
         )
         await job_service.mark_job_failure(job_uuid, "flux_kontext_min_runtime_violation")
         raise CallbackValidationError("Flux-Kontext jobs must run for at least 10 seconds before completing")
+
+    @staticmethod
+    def _extract_webhook_url(job: Any) -> Optional[str]:
+        payload = getattr(getattr(job, "job_request", None), "payload", None)
+        if not isinstance(payload, dict):
+            return None
+        url = payload.get("webhook_url")
+        if not isinstance(url, str):
+            return None
+        normalized = url.strip()
+        return normalized or None
+
+    def _forward_to_webhook(
+        self,
+        *,
+        webhook_url: Optional[str],
+        job_id: str,
+        status: str,
+        completed_at: str,
+        error: Optional[str],
+        latencies: Dict[str, Optional[int]],
+        image_bytes: Optional[bytes],
+        image_filename: Optional[str],
+        image_content_type: Optional[str],
+    ) -> bool:
+        if not webhook_url:
+            return False
+
+        if self._webhook_dispatcher is None:
+            logger.warning(
+                "callback.webhook_dispatcher_missing job_id=%s webhook_url=%s",
+                job_id,
+                webhook_url,
+            )
+            return False
+
+        try:
+            dispatched = self._webhook_dispatcher.dispatch(
+                webhook_url=webhook_url,
+                job_id=job_id,
+                status=status,
+                completed_at=completed_at,
+                error=error,
+                latencies=latencies,
+                image_bytes=image_bytes,
+                image_filename=image_filename,
+                image_content_type=image_content_type,
+            )
+        except Exception:  # noqa: BLE001 - defensive guard
+            logger.exception(
+                "callback.webhook_dispatch_error job_id=%s webhook_url=%s",
+                job_id,
+                webhook_url,
+            )
+            return False
+
+        if dispatched:
+            logger.info(
+                "callback.webhook_forward_queued job_id=%s webhook_url=%s has_image=%s",
+                job_id,
+                webhook_url,
+                bool(image_bytes),
+            )
+        else:
+            logger.warning(
+                "callback.webhook_forward_not_dispatched job_id=%s webhook_url=%s",
+                job_id,
+                webhook_url,
+            )
+        return dispatched
 
     async def list_callbacks(
         self,

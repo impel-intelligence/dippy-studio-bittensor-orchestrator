@@ -244,6 +244,8 @@ class ListenService:
             raise ValueError("Job payload must be a JSON object")
 
         payload_copy = deepcopy(base_payload)
+        # Remove metadata that should not be sent to miners.
+        payload_copy.pop("webhook_url", None)
         payload_copy.setdefault("job_id", str(job.job_id))
 
         secret = getattr(job, "callback_secret", None)

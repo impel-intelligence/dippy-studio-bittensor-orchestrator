@@ -20,6 +20,7 @@ from orchestrator.services.job_service import JobService
 from orchestrator.services.listen_service import ListenService
 from orchestrator.services.score_service import ScoreService
 from orchestrator.services.sync_waiter import SyncCallbackWaiter
+from orchestrator.services.webhook_dispatcher import WebhookDispatcher
 
 
 @dataclass
@@ -36,6 +37,7 @@ class DependencyRegistry:
     epistula_client: Optional[EpistulaClient] = None
     sync_callback_waiter: Optional[SyncCallbackWaiter] = None
     job_service: Optional[JobService] = None
+    webhook_dispatcher: Optional[WebhookDispatcher] = None
 
 
 _registry = DependencyRegistry()
@@ -62,6 +64,7 @@ def set_dependencies(
     score_service: Optional[ScoreService] = None,
     epistula_client: Optional[EpistulaClient] = None,
     sync_callback_waiter: Optional[SyncCallbackWaiter] = None,
+    webhook_dispatcher: Optional[WebhookDispatcher] = None,
 ) -> None:
     """Set the global dependencies that will be injected into services."""
     if miner_metagraph_service is not None:
@@ -87,6 +90,8 @@ def set_dependencies(
         _registry.epistula_client = epistula_client
     if sync_callback_waiter is not None:
         _registry.sync_callback_waiter = sync_callback_waiter
+    if webhook_dispatcher is not None:
+        _registry.webhook_dispatcher = webhook_dispatcher
 
 
 def get_miner_metagraph_service() -> MinerMetagraphService:
@@ -123,17 +128,25 @@ def get_score_service() -> ScoreService:
     return _require("score_service", "ScoreService not initialized")  # type: ignore[return-value]
 
 def get_sync_callback_waiter() -> SyncCallbackWaiter:
-    if _registry.sync_callback_waiter is None:
-        _registry.sync_callback_waiter = SyncCallbackWaiter()
-    return _registry.sync_callback_waiter
+    return _require("sync_callback_waiter", "Sync callback waiter not initialized")  # type: ignore[return-value]
+
+
+def get_webhook_dispatcher() -> WebhookDispatcher:
+    if _registry.webhook_dispatcher is None:
+        _registry.webhook_dispatcher = WebhookDispatcher()
+    return _registry.webhook_dispatcher
 
 
 def get_callback_service(
     sync_waiter: SyncCallbackWaiter = Depends(get_sync_callback_waiter),
+    webhook_dispatcher: WebhookDispatcher = Depends(get_webhook_dispatcher),
 ) -> CallbackService:
     if _registry.callback_service is not None:
         return _registry.callback_service
-    return CallbackService(sync_waiter=sync_waiter)
+    return CallbackService(
+        sync_waiter=sync_waiter,
+        webhook_dispatcher=webhook_dispatcher,
+    )
 
 
 def get_job_relay_client() -> BaseJobRelayClient:

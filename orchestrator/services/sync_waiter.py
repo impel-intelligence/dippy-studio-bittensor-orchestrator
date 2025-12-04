@@ -191,6 +191,14 @@ class RedisSyncCallbackWaiter(BaseSyncCallbackWaiter):
         self._ttl = max(int(result_ttl_seconds or 0), 1)
         self._local = InMemorySyncCallbackWaiter()
 
+    async def ping(self) -> None:
+        """Verify connectivity to the Redis backend."""
+        try:
+            await self._redis.ping()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("redis_waiter.ping_failed error=%s", exc)
+            raise
+
     async def register(self, job_id: uuid.UUID | str) -> None:
         await self._local.register(job_id)
 

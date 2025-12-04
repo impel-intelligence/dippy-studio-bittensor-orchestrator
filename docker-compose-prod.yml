@@ -30,7 +30,7 @@ services:
       jobrelay:
         condition: service_started
       redis:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
     volumes:
       - orchestrator_data:/var/lib/orchestrator
@@ -39,6 +39,30 @@ services:
       - ${GCS_CREDENTIALS_FILE:-./gcs_service_account.json}:/app/gcs_service_account.json:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  forwarder:
+    container_name: forwarder-prod
+    build:
+      context: .
+      dockerfile: forwarder.Dockerfile
+    image: just-forwarder:prod-local
+    command: python -m forwarder.server
+    env_file:
+      - .env
+    environment:
+      - FORWARDER_PORT=${FORWARDER_PORT:-9871}
+      - FORWARDER_ORCHESTRATOR_BASE_URL=http://orchestrator:${ORCHESTRATOR_PORT:-42169}
+      - FORWARDER_LISTEN_AUTH_SECRET=${LISTEN_AUTH_SECRET:-orchestrator-listen-secret}
+      - FORWARDER_JOB_TYPE=${FORWARDER_JOB_TYPE:-base-h100_pcie}
+      - FORWARDER_TIMEOUT_SECONDS=${FORWARDER_TIMEOUT_SECONDS:-10}
+    ports:
+      - "${FORWARDER_PORT:-9871}:${FORWARDER_PORT:-9871}"
+    depends_on:
+      orchestrator:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - .:/app
 
   jobrelay:
     container_name: jobrelay-prod

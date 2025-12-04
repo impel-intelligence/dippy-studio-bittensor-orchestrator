@@ -27,6 +27,7 @@ from orchestrator.repositories import AuditFailureRepository, MinerRepository
 from orchestrator.services.score_service import ScoreService
 from orchestrator.domain.miner import Miner
 from orchestrator.services.sync_waiter import RedisSyncCallbackWaiter, SyncCallbackWaiter
+from orchestrator.services.webhook_dispatcher import WebhookDispatcher
 
 __all__ = ["orchestrator"]
 
@@ -123,9 +124,11 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             credentials=str(uploader_creds) if uploader_creds is not None else None,
         )
         self.sync_callback_waiter = self._build_sync_waiter()
+        self.webhook_dispatcher = WebhookDispatcher()
         self.callback_service = CallbackService(
             uploader=self.callback_uploader,
             sync_waiter=self.sync_callback_waiter,
+            webhook_dispatcher=self.webhook_dispatcher,
         )
 
         jobrelay_cfg = self.config.jobrelay
@@ -178,39 +181,48 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
     def _build_sync_waiter(self) -> SyncCallbackWaiter:
         """Select sync waiter backend based on configuration."""
         sync_cfg = self.config.listen.sync
-        backend = (sync_cfg.backend or "memory").strip().lower()
-        if backend == "redis":
-            redis_url = sync_cfg.redis_url or os.getenv("LISTEN_SYNC_REDIS_URL")
-            if not redis_url:
-                self.server_context.logger.warning("sync_waiter.redis_url_missing fallback=memory")
-                return SyncCallbackWaiter()
-            try:
-                import redis.asyncio as redis_async  # type: ignore[import-not-found]
+        backend = (sync_cfg.backend or "redis").strip().lower()
+        if backend != "redis":
+            raise RuntimeError(f"Unsupported sync waiter backend: {backend}")
 
-                redis_client = redis_async.from_url(redis_url)
-                self.server_context.logger.info(
-                    "sync_waiter.backend_selected",
-                    backend="redis",
-                    redis_url=redis_url,
-                    prefix=sync_cfg.redis_channel_prefix,
-                    ttl_seconds=sync_cfg.redis_result_ttl_seconds,
-                )
-                return RedisSyncCallbackWaiter(
-                    redis_client,
-                    channel_prefix=sync_cfg.redis_channel_prefix,
-                    result_ttl_seconds=sync_cfg.redis_result_ttl_seconds,
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                self.server_context.logger.warning(
-                    "sync_waiter.redis_init_failed",
-                    backend="redis",
-                    redis_url=redis_url,
-                    error=str(exc),
-                )
-                return SyncCallbackWaiter()
+        redis_url = sync_cfg.redis_url or os.getenv("LISTEN_SYNC_REDIS_URL")
+        if not redis_url:
+            raise RuntimeError("Redis URL must be configured for sync callback waiter")
 
-        self.server_context.logger.info("sync_waiter.backend_selected", backend="memory")
-        return SyncCallbackWaiter()
+        try:
+            import redis.asyncio as redis_async  # type: ignore[import-not-found]
+        except Exception as exc:  # noqa: BLE001
+            self.server_context.logger.error(
+                "sync_waiter.redis_dependency_missing",
+                backend="redis",
+                error=str(exc),
+            )
+            raise RuntimeError("Redis support is required for sync callback waiter") from exc
+
+        try:
+            redis_client = redis_async.from_url(redis_url)
+            self.server_context.logger.info(
+                "sync_waiter.backend_selected",
+                backend="redis",
+                redis_url=redis_url,
+                prefix=sync_cfg.redis_channel_prefix,
+                ttl_seconds=sync_cfg.redis_result_ttl_seconds,
+            )
+            # Persist the resolved URL for downstream logging and verification.
+            self.config.listen.sync.redis_url = redis_url
+            return RedisSyncCallbackWaiter(
+                redis_client,
+                channel_prefix=sync_cfg.redis_channel_prefix,
+                result_ttl_seconds=sync_cfg.redis_result_ttl_seconds,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            self.server_context.logger.error(
+                "sync_waiter.redis_init_failed",
+                backend="redis",
+                redis_url=redis_url,
+                error=str(exc),
+            )
+            raise RuntimeError("Failed to initialize Redis sync callback waiter") from exc
 
     @staticmethod
     def _coerce_int(candidate: str | None, default: int) -> int:
@@ -282,9 +294,34 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             score_service=self.score_service,
             epistula_client=self.epistula_client,
             sync_callback_waiter=self.sync_callback_waiter,
+            webhook_dispatcher=self.webhook_dispatcher,
         )
         self.app.include_router(create_internal_router())
         self.app.include_router(create_public_router())
+
+        async def _verify_sync_waiter_connection() -> None:
+            self.server_context.logger.info(
+                "sync_waiter.connection_check.start",
+                redis_url=self.config.listen.sync.redis_url,
+                prefix=self.config.listen.sync.redis_channel_prefix,
+            )
+            if not isinstance(self.sync_callback_waiter, RedisSyncCallbackWaiter):
+                raise RuntimeError("Redis sync callback waiter not configured")
+            try:
+                await self.sync_callback_waiter.ping()
+            except Exception as exc:  # noqa: BLE001
+                self.server_context.logger.error(
+                    "sync_waiter.connection_check_failed",
+                    redis_url=self.config.listen.sync.redis_url,
+                    prefix=self.config.listen.sync.redis_channel_prefix,
+                    error=str(exc),
+                )
+                raise RuntimeError("Redis connectivity check failed") from exc
+            self.server_context.logger.info(
+                "sync_waiter.connection_check.ok",
+                redis_url=self.config.listen.sync.redis_url,
+                prefix=self.config.listen.sync.redis_channel_prefix,
+            )
 
         async def _verify_jobrelay_connection() -> None:
             self.server_context.logger.info(
@@ -306,6 +343,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
                 url=self.config.jobrelay.base_url,
             )
 
+        self.app.add_event_handler("startup", _verify_sync_waiter_connection)
         self.app.add_event_handler("startup", _verify_jobrelay_connection)
 
 

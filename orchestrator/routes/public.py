@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
-from pydantic import BaseModel
+from pydantic import AnyHttpUrl, BaseModel
 
 from orchestrator.domain.miner import Miner
 from orchestrator.common.job_store import JobStatus, JobType
@@ -59,6 +59,11 @@ class ListenRequest(BaseModel):
     job_type: JobType
     payload: Any
     job_id: Optional[uuid.UUID] = None
+
+
+class RemoteListenRequest(ListenRequest):
+    webhook_url: AnyHttpUrl
+    route_to_auditor: bool = False
 
 
 class DebugListenRequest(ListenRequest):
@@ -131,8 +136,43 @@ def create_public_router() -> APIRouter:
             job_id = await listen_service.process(
                 job_type=listen_request.job_type,
                 payload=listen_request.payload,
-            desired_job_id=listen_request.job_id,
-        )
+                desired_job_id=listen_request.job_id,
+            )
+        except ListenServiceError as exc:
+            raise_listen_service_error(exc)
+        except JobServiceError as exc:
+            raise_job_service_error(exc)
+
+        return ListenResponse(job_id=job_id)
+
+    @router.post(
+        "/listen/remote",
+        response_model=ListenResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def listen_remote(
+        listen_request: RemoteListenRequest,
+        request: Request,
+        listen_service: ListenService = Depends(get_listen_service),
+        slog: StructuredLogger = Depends(get_structured_logger),
+    ) -> ListenResponse:
+        provided_secret = request.headers.get(LISTEN_AUTH_HEADER)
+        if provided_secret != LISTEN_AUTH_SECRET:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid service auth secret",
+            )
+
+        payload = _attach_webhook_url(listen_request.payload, str(listen_request.webhook_url))
+        override_miner = stubbing.AUDIT_MINER if listen_request.route_to_auditor else None
+
+        try:
+            job_id = await listen_service.process(
+                job_type=listen_request.job_type,
+                payload=payload,
+                desired_job_id=listen_request.job_id,
+                override_miner=override_miner,
+            )
         except ListenServiceError as exc:
             raise_listen_service_error(exc)
         except JobServiceError as exc:
@@ -436,4 +476,12 @@ def _override_callback_url(payload: Any) -> Any:
         return payload
     updated = dict(payload)
     updated["callback_url"] = f"{DEBUG_CALLBACK_BASE}/results/callback"
+    return updated
+
+
+def _attach_webhook_url(payload: Any, webhook_url: str) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    updated = dict(payload)
+    updated["webhook_url"] = webhook_url
     return updated
