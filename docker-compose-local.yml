@@ -4,15 +4,15 @@ services:
     build:
       context: .
       dockerfile: orchestrator/orchestrator.dev.Dockerfile
-    command: python orchestrator/server.py --live-reload --port ${ORCHESTRATOR_PORT:-8338}
+    command: python orchestrator/server.py --live-reload --port ${ORCHESTRATOR_PORT:-42169}
     ports:
-      - "${ORCHESTRATOR_PORT:-8338}:${ORCHESTRATOR_PORT:-8338}"
+      - "${ORCHESTRATOR_PORT:-42169}:${ORCHESTRATOR_PORT:-42169}"
     volumes:
       - .:/app
       - ${HOME}/.bittensor:/home/appuser/.bittensor:ro
       - ./gcs_service_account.json:/app/gcs_service_account.json:ro
     environment:
-      - ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-8338}
+      - ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-42169}
       - EPISTULA_HOTKEY_PATH=/home/appuser/.bittensor/wallets/coldkey/hotkeys/hotkey
       - CALLBACK_GCS_BUCKET=${CALLBACK_GCS_BUCKET}
       - CALLBACK_GCS_PREFIX=${CALLBACK_GCS_PREFIX:-callbacks}

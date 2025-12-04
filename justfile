@@ -14,21 +14,21 @@ default:
 # Build and start the local dev stack
 up:
 	docker compose --file docker-compose-local.yml up -d --build
-	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-8338} (Docker)"
+	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-42169} (Docker)"
 	@echo "🧪 Stub miner available at http://localhost:${STUB_MINER_PORT:-8765}"
 	@echo "   View logs: just devlogs or just orclogs"
 
 # Start local dev stack without rebuilding
 local:
 	docker compose --file docker-compose-local.yml up -d
-	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-8338} (Docker)"
+	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-42169} (Docker)"
 	@echo "🧪 Stub miner available at http://localhost:${STUB_MINER_PORT:-8765}"
 	@echo "   View logs: just devlogs or just orclogs"
 
 # Rebuild and restart only the orchestrator-dev service
 local-rebuild:
 	docker compose --file docker-compose-local.yml up -d --build orchestrator-dev
-	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-8338} (Docker)"
+	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-42169} (Docker)"
 	@echo "🧪 Stub miner available at http://localhost:${STUB_MINER_PORT:-8765}"
 	@echo "   View logs: just devlogs or just orclogs"
 
@@ -181,7 +181,7 @@ integration-test args="": integration-migrate
 
 # Run functional tests against running orchestrator
 functional-tests:
-	API_BASE_URL="${API_BASE_URL:-http://localhost:${ORCHESTRATOR_PORT:-8338}}" \
+	API_BASE_URL="${API_BASE_URL:-http://localhost:${ORCHESTRATOR_PORT:-42169}}" \
 		uv run --with pytest pytest functional_tests
 
 # ═══════════════════════════════════════════════════════════════════════════

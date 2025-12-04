@@ -99,6 +99,34 @@ def _miner(address: str) -> SimpleNamespace:
     return SimpleNamespace(network_address=address)
 
 
+def test_apply_listen_payload_overrides_caps_kontext_steps() -> None:
+    listen_service = _make_service()
+    payload = {"callback_url": "https://callback.example", "num_inference_steps": 30}
+
+    updated = listen_service._apply_listen_payload_overrides(JobType.FLUX_KONTEXT, payload)
+
+    assert updated["num_inference_steps"] == 10
+    assert payload["num_inference_steps"] == 30
+
+
+def test_apply_listen_payload_overrides_respects_existing_cap() -> None:
+    listen_service = _make_service()
+    payload = {"callback_url": "https://callback.example", "num_inference_steps": 8}
+
+    updated = listen_service._apply_listen_payload_overrides(JobType.FLUX_KONTEXT, payload)
+
+    assert updated["num_inference_steps"] == 8
+
+
+def test_apply_listen_payload_overrides_ignores_non_kontext_jobs() -> None:
+    listen_service = _make_service()
+    payload = {"callback_url": "https://callback.example", "num_inference_steps": 42}
+
+    updated = listen_service._apply_listen_payload_overrides(JobType.FLUX_DEV, payload)
+
+    assert updated["num_inference_steps"] == 42
+
+
 def test_build_dispatch_payload_includes_flux_dev_overrides() -> None:
     listen_service = _make_service()
     job = _job(JobType.FLUX_DEV)
@@ -160,6 +188,32 @@ def test_resolve_inference_url_preserves_existing_edit_endpoint() -> None:
     url = listen_service._resolve_inference_url(miner, JobType.FLUX_KONTEXT)
 
     assert url == "https://miner.example/api/edit"
+
+
+@pytest.mark.asyncio
+async def test_process_caps_inference_steps_before_job_creation() -> None:
+    miner = SimpleNamespace(hotkey="hk", network_address="https://miner.example")
+    job_service = _StubJobService()
+    listen_service = ListenService(
+        job_service=job_service,
+        metagraph=_StubMetagraph(miner=miner),
+        logger=_StubLogger(),
+        epistula_client=_StubEpistula(),
+        callback_url="https://callback.example",
+    )
+
+    payload = {"callback_url": "https://callback.example", "num_inference_steps": 25}
+
+    await listen_service.process(
+        job_type=JobType.FLUX_KONTEXT,
+        payload=payload,
+        desired_job_id=None,
+    )
+
+    assert job_service.created
+    _, created_payload = job_service.created[0]
+    assert created_payload["num_inference_steps"] == 10
+    assert payload["num_inference_steps"] == 25
 
 
 @pytest.mark.asyncio

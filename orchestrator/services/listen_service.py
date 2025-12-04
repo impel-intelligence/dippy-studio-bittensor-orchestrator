@@ -12,7 +12,7 @@ from orchestrator.domain.miner import Miner
 from orchestrator.services.job_service import JobService
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.services.exceptions import MinerSelectionError
-
+TEMP_OVERRIDE_STEPS = 10
 
 _TASK_TYPE_PAYLOAD_OVERRIDES: dict[JobType, dict[str, str]] = {
     JobType.FLUX_DEV: {
@@ -55,9 +55,10 @@ class ListenService:
         desired_job_id: Optional[uuid.UUID],
     ) -> uuid.UUID:
         miner = self._select_miner(job_type)
+        normalized_payload = self._apply_listen_payload_overrides(job_type, payload)
         job = await self._create_job(
             job_type=job_type,
-            payload=payload,
+            payload=normalized_payload,
             miner=miner,
             desired_job_id=desired_job_id,
         )
@@ -204,8 +205,7 @@ class ListenService:
     def _resolve_inference_url(self, miner: Miner, job_type: JobType) -> str:
         address = (miner.network_address or "").strip()
         # img-h100* jobs must hit the edit endpoint (including any string aliases)
-        job_type_value = job_type.value if isinstance(job_type, JobType) else str(job_type or "")
-        uses_edit = job_type in _KONTEXT_JOB_TYPES or "img-h100" in job_type_value.lower()
+        uses_edit = self._is_kontext_job_type(job_type)
         endpoint = "/edit" if uses_edit else "/inference"
 
         base = address.rstrip("/")
@@ -256,6 +256,45 @@ class ListenService:
         payload_copy["callback_url"] = callback_url
         self._apply_task_type_overrides(job, payload_copy)
         return payload_copy
+
+    def _apply_listen_payload_overrides(self, job_type: JobType, payload: Any) -> Any:
+        if not isinstance(payload, dict):
+            return payload
+
+        if not self._is_kontext_job_type(job_type):
+            return payload
+
+        normalized_steps = self._normalize_inference_steps(payload.get("num_inference_steps"))
+        if normalized_steps is None or normalized_steps <= TEMP_OVERRIDE_STEPS:
+            return payload
+
+        capped_payload = deepcopy(payload)
+        capped_payload["num_inference_steps"] = TEMP_OVERRIDE_STEPS
+        return capped_payload
+
+    @staticmethod
+    def _normalize_inference_steps(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            steps = int(value)
+        except (TypeError, ValueError):
+            return None
+        return steps
+
+    @staticmethod
+    def _is_kontext_job_type(job_type: JobType | str | None) -> bool:
+        if job_type in _KONTEXT_JOB_TYPES:
+            return True
+
+        job_type_value = ""
+        if isinstance(job_type, JobType):
+            job_type_value = job_type.value
+        elif job_type is not None:
+            job_type_value = str(job_type)
+
+        normalized = job_type_value.lower()
+        return "img-h100" in normalized or "kontext" in normalized
 
     def _apply_task_type_overrides(self, job: Any, payload: dict[str, Any]) -> None:
         job_type = getattr(getattr(job, "job_request", None), "job_type", None)

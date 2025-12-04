@@ -61,11 +61,11 @@ RUN useradd --create-home --shell /bin/bash appuser && \
 USER appuser
 
 ENV UV_CACHE_DIR=/home/appuser/.cache/uv
-ENV ORCHESTRATOR_PORT=8338
+ENV ORCHESTRATOR_PORT=42169
 
-EXPOSE 8338
+EXPOSE 42169
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD sh -c 'curl -f http://localhost:${ORCHESTRATOR_PORT:-8338}/docs || exit 1'
+    CMD sh -c 'curl -f http://localhost:${ORCHESTRATOR_PORT:-42169}/docs || exit 1'
 
 CMD ["python", "-m", "orchestrator.server"]

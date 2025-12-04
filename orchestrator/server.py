@@ -210,7 +210,7 @@ def create_app() -> FastAPI:
 
 
 if __name__ == "__main__":
-    default_port = int(os.getenv("ORCHESTRATOR_PORT", "8338"))
+    default_port = int(os.getenv("ORCHESTRATOR_PORT", "42169"))
     parser = argparse.ArgumentParser(description="Orchestrator Service")
     parser.add_argument(
         "--live-reload",
@@ -221,7 +221,7 @@ if __name__ == "__main__":
         "--port",
         type=int,
         default=default_port,
-        help="Port to bind the server (default comes from ORCHESTRATOR_PORT or 8338)",
+        help="Port to bind the server (default comes from ORCHESTRATOR_PORT or 42169)",
     )
     
     args = parser.parse_args()

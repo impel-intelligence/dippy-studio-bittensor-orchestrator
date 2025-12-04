@@ -6,7 +6,7 @@ This repository hosts the orchestration layer that coordinates miners, validator
 - Copy `.env.example` to `.env` and fill in the required secrets.
 - Start the dev stack: `just up`. To skip rebuilding images use `just local`.
 - Confirm services are healthy:
-  - Orchestrator API: `http://localhost:8338/health`
+  - Orchestrator API: `http://localhost:42169/health`
   - Jobrelay API: `http://localhost:8181/health`
   - Stub miner API: `http://localhost:8765/`
 - Tail logs with `just devlogs` (or `just orclogs` for orchestrator-only).
