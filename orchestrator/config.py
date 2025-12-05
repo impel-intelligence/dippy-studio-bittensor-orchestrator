@@ -9,6 +9,8 @@ from typing import Any, Mapping, Optional
 
 import yaml
 
+from orchestrator.common.stubbing import DEFAULT_AUDIT_MINER_NETWORK_ADDRESS
+
 
 DEFAULT_CONFIG_PATH = Path("orchestrator/config.yaml")
 FALLBACK_CONFIG_PATH = Path("orchestrator/config.example.yaml")
@@ -138,6 +140,31 @@ class ScoreConfig:
 
 
 @dataclass
+class AuditSeedConfig:
+    redis_url: Optional[str] = None
+    redis_namespace: str = "audit_seed"
+    dispatch_delay_seconds: float = 15.0
+    limit: int = 10
+
+    def normalized(self, *, default_redis_url: Optional[str] = None) -> "AuditSeedConfig":
+        redis_url = self.redis_url or default_redis_url
+        namespace = (self.redis_namespace or "audit_seed").strip() or "audit_seed"
+        delay = _maybe_float(self.dispatch_delay_seconds, 15.0)
+        if delay is None or delay < 0.0:
+            delay = 0.0
+        limit = _maybe_int(self.limit, 10) or 10
+        if limit <= 0:
+            limit = 1
+
+        return AuditSeedConfig(
+            redis_url=redis_url,
+            redis_namespace=namespace,
+            dispatch_delay_seconds=delay,
+            limit=limit,
+        )
+
+
+@dataclass
 class OrchestratorConfig:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     metagraph: MetagraphConfig = field(default_factory=MetagraphConfig)
@@ -146,7 +173,9 @@ class OrchestratorConfig:
     listen: ListenConfig = field(default_factory=ListenConfig)
     jobrelay: JobRelayConfig = field(default_factory=JobRelayConfig)
     scores: ScoreConfig = field(default_factory=ScoreConfig)
+    audit_seed: AuditSeedConfig = field(default_factory=AuditSeedConfig)
     audit_sample_size: float = 0.1
+    audit_miner_network_address: Optional[str] = DEFAULT_AUDIT_MINER_NETWORK_ADDRESS
     metagraph_runner_interval: float = 300.0
     audit_target_domain: Optional[str] = None
 
@@ -268,7 +297,29 @@ class OrchestratorConfig:
             lookback_days=lookback_value,
         ).normalized()
 
+        audit_seed_defaults = AuditSeedConfig()
+        audit_seed_data = data.get("audit_seed", {}) or {}
+        audit_seed_namespace = (
+            audit_seed_data.get("redis_namespace") or audit_seed_defaults.redis_namespace
+        )
+        if audit_seed_namespace:
+            audit_seed_namespace = audit_seed_namespace.strip()
+        audit_seed_delay = _maybe_float(
+            audit_seed_data.get("dispatch_delay_seconds"),
+            audit_seed_defaults.dispatch_delay_seconds,
+        )
+        if audit_seed_delay is None or audit_seed_delay < 0.0:
+            audit_seed_delay = audit_seed_defaults.dispatch_delay_seconds
+        audit_seed_limit = _maybe_int(audit_seed_data.get("limit"), audit_seed_defaults.limit)
+        if audit_seed_limit is None or audit_seed_limit <= 0:
+            audit_seed_limit = audit_seed_defaults.limit
+        audit_seed_redis_url = audit_seed_data.get("redis_url")
+
         audit_sample_size = float(data.get("audit_sample_size", 0.1))
+        raw_audit_address = data.get("audit_miner_network_address")
+        audit_miner_network_address = (
+            str(raw_audit_address).strip() if raw_audit_address else DEFAULT_AUDIT_MINER_NETWORK_ADDRESS
+        )
         metagraph_runner_interval = float(data.get("metagraph_runner_interval", 300.0))
         audit_target_domain = (data.get("audit_target_domain") or None)
 
@@ -279,7 +330,14 @@ class OrchestratorConfig:
             listen=listen,
             jobrelay=jobrelay,
             scores=scores,
+            audit_seed=AuditSeedConfig(
+                redis_url=audit_seed_redis_url or listen.sync.redis_url,
+                redis_namespace=audit_seed_namespace or audit_seed_defaults.redis_namespace,
+                dispatch_delay_seconds=audit_seed_delay,
+                limit=audit_seed_limit,
+            ).normalized(default_redis_url=listen.sync.redis_url),
             audit_sample_size=audit_sample_size,
+            audit_miner_network_address=audit_miner_network_address,
             metagraph_runner_interval=metagraph_runner_interval,
             audit_target_domain=audit_target_domain,
             subnet=subnet,
@@ -323,6 +381,9 @@ class OrchestratorConfig:
 
         if "AUDIT_SAMPLE_SIZE" in env:
             self.audit_sample_size = _maybe_float(env["AUDIT_SAMPLE_SIZE"], self.audit_sample_size)
+        if "AUDIT_MINER_NETWORK_ADDRESS" in env:
+            value = env["AUDIT_MINER_NETWORK_ADDRESS"].strip()
+            self.audit_miner_network_address = value or DEFAULT_AUDIT_MINER_NETWORK_ADDRESS
         if "AUDIT_TARGET_DOMAIN" in env:
             value = env["AUDIT_TARGET_DOMAIN"].strip()
             self.audit_target_domain = value or None
@@ -378,6 +439,25 @@ class OrchestratorConfig:
             if prefix_override:
                 self.listen.sync.redis_channel_prefix = prefix_override
 
+        if "AUDIT_SEED_REDIS_URL" in env:
+            redis_url_override = env["AUDIT_SEED_REDIS_URL"].strip()
+            self.audit_seed.redis_url = redis_url_override or self.audit_seed.redis_url
+        if "AUDIT_SEED_REDIS_NAMESPACE" in env:
+            namespace_override = env["AUDIT_SEED_REDIS_NAMESPACE"].strip()
+            if namespace_override:
+                self.audit_seed.redis_namespace = namespace_override
+        if "AUDIT_SEED_DISPATCH_DELAY_SECONDS" in env:
+            delay_override = _maybe_float(
+                env["AUDIT_SEED_DISPATCH_DELAY_SECONDS"],
+                self.audit_seed.dispatch_delay_seconds,
+            )
+            if delay_override is not None and delay_override >= 0.0:
+                self.audit_seed.dispatch_delay_seconds = delay_override
+        if "AUDIT_SEED_LIMIT" in env:
+            limit_override = _maybe_int(env["AUDIT_SEED_LIMIT"], self.audit_seed.limit)
+            if limit_override is not None and limit_override > 0:
+                self.audit_seed.limit = limit_override
+
 
         if "EMA_ALPHA" in env:
             alpha = _maybe_float(env["EMA_ALPHA"], self.scores.ema_alpha)
@@ -399,6 +479,7 @@ class OrchestratorConfig:
 
         self.scores = self.scores.normalized()
         self.listen.sync = self.listen.sync.normalized()
+        self.audit_seed = self.audit_seed.normalized(default_redis_url=self.listen.sync.redis_url)
 
 
 def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None = None) -> OrchestratorConfig:
@@ -453,5 +534,6 @@ __all__ = [
     "ListenSyncConfig",
     "JobRelayConfig",
     "ScoreConfig",
+    "AuditSeedConfig",
     "load_config",
 ]

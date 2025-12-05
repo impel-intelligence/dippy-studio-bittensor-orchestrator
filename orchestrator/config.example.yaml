@@ -11,7 +11,14 @@ subnet:
   network: finney
 
 audit_sample_size: 0.1
+audit_miner_network_address: https://minertest.dippy-bittensor.studio
 metagraph_runner_interval: 300
+
+audit_seed:
+  redis_url: redis://redis:6379/0
+  redis_namespace: audit_seed
+  dispatch_delay_seconds: 15
+  limit: 10
 
 callback:
   uploader: noop

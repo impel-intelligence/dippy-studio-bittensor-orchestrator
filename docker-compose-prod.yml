@@ -43,6 +43,7 @@ services:
       - ${GCS_CREDENTIALS_FILE:-./gcs_service_account.json}:/app/gcs_service_account.json:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "signoz-otel-collector:host-gateway"
 
   forwarder:
     container_name: forwarder-prod
@@ -94,6 +95,8 @@ services:
     volumes:
       - jobrelay_data:/var/lib/jobrelay
       - ${GCS_CREDENTIALS_FILE:-./gcs_service_account.json}:/app/gcs_service_account.json:ro
+    extra_hosts:
+      - "signoz-otel-collector:host-gateway"
 
   redis:
     image: redis:7-alpine

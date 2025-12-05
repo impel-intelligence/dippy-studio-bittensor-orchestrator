@@ -155,6 +155,7 @@ def create_public_router() -> APIRouter:
         request: Request,
         listen_service: ListenService = Depends(get_listen_service),
         slog: StructuredLogger = Depends(get_structured_logger),
+        config: OrchestratorConfig = Depends(get_config),
     ) -> ListenResponse:
         provided_secret = request.headers.get(LISTEN_AUTH_HEADER)
         if provided_secret != LISTEN_AUTH_SECRET:
@@ -164,7 +165,8 @@ def create_public_router() -> APIRouter:
             )
 
         payload = _attach_webhook_url(listen_request.payload, str(listen_request.webhook_url))
-        override_miner = stubbing.AUDIT_MINER if listen_request.route_to_auditor else None
+        audit_miner = stubbing.resolve_audit_miner(config.audit_miner_network_address)
+        override_miner = audit_miner if listen_request.route_to_auditor else None
 
         try:
             job_id = await listen_service.process(
@@ -190,6 +192,7 @@ def create_public_router() -> APIRouter:
         request: Request,
         listen_service: ListenService = Depends(get_listen_service),
         slog: StructuredLogger = Depends(get_structured_logger),
+        config: OrchestratorConfig = Depends(get_config),
     ) -> ListenResponse:
         provided_secret = request.headers.get(LISTEN_AUTH_HEADER)
         if provided_secret != LISTEN_AUTH_SECRET:
@@ -198,7 +201,7 @@ def create_public_router() -> APIRouter:
                 detail="Invalid service auth secret",
             )
 
-        miner = listen_request.miner or stubbing.AUDIT_MINER
+        miner = listen_request.miner or stubbing.resolve_audit_miner(config.audit_miner_network_address)
         payload = _override_callback_url(listen_request.payload)
         slog.info(
             "debug.listen.start",

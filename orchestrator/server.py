@@ -15,6 +15,7 @@ from orchestrator.clients.subnet_state_client import SubnetStateClient
 from orchestrator.common.epistula_client import EpistulaClient
 from orchestrator.common.server_context import ServerContext
 from orchestrator.common.job_store import JobType
+from orchestrator.common.stubbing import resolve_audit_miner
 from orchestrator.config import OrchestratorConfig, load_config
 from orchestrator.dependencies import set_dependencies
 from orchestrator.routes import create_internal_router, create_public_router
@@ -170,6 +171,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
         self.netuid = self.config.subnet.netuid
         self.network = self.config.subnet.network
         self.subnet_state_service = SubnetStateClient(network=self.network)
+        self.audit_miner = resolve_audit_miner(self.config.audit_miner_network_address)
 
         self.server_context = ServerContext.default(service_name="orchestrator")
         self._maybe_seed_local_stub_miner()

@@ -103,7 +103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     logger.info("runner.start targets=%s", ",".join(targets))
     if "metagraph" in targets:
         logger.info(
-            "runner.metagraph-once.start config=%s database_url=%s",
+            "runner.metagraph.start config=%s database_url=%s",
             args.config_path or "<default>",
             args.database_url or "<default>",
         )

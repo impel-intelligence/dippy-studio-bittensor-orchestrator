@@ -133,7 +133,7 @@ class WebhookDispatcher:
 
         response = httpx.post(
             webhook_url,
-            data=data,
+            json=data,
             timeout=self._timeout,
         )
         response.raise_for_status()

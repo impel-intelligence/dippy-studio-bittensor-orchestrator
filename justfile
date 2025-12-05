@@ -86,73 +86,118 @@ prod-down:
 prod-logs:
 	docker compose --file docker-compose-prod.yml logs -f orchestrator jobrelay redis
 
+# Restart prod-equivalent services (keeps volumes/data)
+prod-restart:
+	docker compose --file docker-compose-prod.yml restart orchestrator jobrelay forwarder redis
+	@echo "🔁 Restarted prod stack services"
+
+# Rebuild and restart prod-equivalent services
+prod-rebuild:
+	docker compose --file docker-compose-prod.yml up -d --build orchestrator jobrelay forwarder redis
+	@echo "🛠️  Rebuilt and restarted prod stack services"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # WORKERS
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Run metagraph refresh worker once (local stack)
-run-metagraph-once:
-	docker compose --file docker-compose-local.yml exec orchestrator-dev \
+# Run metagraph refresh worker (env=local|prod)
+run-metagraph env='local':
+	ENV_RAW="{{env}}"; \
+	if [ "${ENV_RAW#env=}" != "${ENV_RAW}" ]; then ENV_VALUE="${ENV_RAW#env=}"; else ENV_VALUE="${ENV_RAW}"; fi; \
+	if [ "${ENV_VALUE}" = "prod" ]; then \
+		COMPOSE_FILE="docker-compose-prod.yml"; \
+		SERVICE="orchestrator"; \
+	else \
+		COMPOSE_FILE="docker-compose-local.yml"; \
+		SERVICE="orchestrator-dev"; \
+	fi; \
+	docker compose --file "$COMPOSE_FILE" exec "$SERVICE" \
 		python -m orchestrator.workers metagraph
 
-# Run metagraph refresh worker once (prod stack)
-run-metagraph-once-prod:
-	docker compose --file docker-compose-prod.yml exec orchestrator \
-		python -m orchestrator.workers metagraph
-
-# Run score ETL worker once (local stack)
-run-score-etl-once hotkey='':
-	@if [ -n "{{hotkey}}" ]; then \
+# Run score ETL worker
+run-score-etl env='local' hotkey='':
+	ENV_RAW="{{env}}"; \
+	if [ "${ENV_RAW#env=}" != "${ENV_RAW}" ]; then ENV_VALUE="${ENV_RAW#env=}"; else ENV_VALUE="${ENV_RAW}"; fi; \
+	if [ "${ENV_VALUE}" = "prod" ]; then \
+		COMPOSE_FILE="docker-compose-prod.yml"; \
+		SERVICE="orchestrator"; \
+	else \
+		COMPOSE_FILE="docker-compose-local.yml"; \
+		SERVICE="orchestrator-dev"; \
+	fi; \
+	if [ -n "{{hotkey}}" ]; then \
 		HOTKEY_FLAG="--hotkey {{hotkey}}"; \
 	else \
 		HOTKEY_FLAG=""; \
 	fi; \
-	docker compose --file docker-compose-local.yml exec orchestrator-dev \
+	docker compose --file "$COMPOSE_FILE" exec "$SERVICE" \
 		python -m orchestrator.workers score $HOTKEY_FLAG
 
-# Run score ETL worker once (prod stack)
-run-score-etl-once-prod hotkey='':
-	@if [ -n "{{hotkey}}" ]; then \
-		HOTKEY_FLAG="--hotkey {{hotkey}}"; \
+# Run audit seed worker
+run-audit-seed env='local' job_type='' preview='false':
+	ENV_RAW="{{env}}"; \
+	if [ "${ENV_RAW#env=}" != "${ENV_RAW}" ]; then ENV_VALUE="${ENV_RAW#env=}"; else ENV_VALUE="${ENV_RAW}"; fi; \
+	if [ "${ENV_VALUE}" = "prod" ]; then \
+		COMPOSE_FILE="docker-compose-prod.yml"; \
+		SERVICE="orchestrator"; \
 	else \
-		HOTKEY_FLAG=""; \
+		COMPOSE_FILE="docker-compose-local.yml"; \
+		SERVICE="orchestrator-dev"; \
 	fi; \
-	docker compose --file docker-compose-prod.yml exec orchestrator \
-		python -m orchestrator.workers score $HOTKEY_FLAG
-
-# Run audit seed worker once
-run-audit-seed-once job_type='':
-	@if [ -n "{{job_type}}" ]; then \
+	if [ -n "{{job_type}}" ]; then \
 		AUDIT_JOB_TYPE="--audit-job-type {{job_type}}"; \
 	else \
 		AUDIT_JOB_TYPE=""; \
 	fi; \
-	docker compose --file docker-compose-local.yml exec orchestrator-dev \
-		python -m orchestrator.workers audit-seed $AUDIT_JOB_TYPE
+	if [ "{{preview}}" = "true" ]; then \
+		PREVIEW_FLAG="--audit-preview"; \
+	else \
+		PREVIEW_FLAG=""; \
+	fi; \
+	docker compose --file "$COMPOSE_FILE" exec "$SERVICE" \
+		python -m orchestrator.workers audit-seed $AUDIT_JOB_TYPE $PREVIEW_FLAG
 
-# Run audit check worker once
-run-audit-check-once apply='false':
-	@if [ "{{apply}}" = "true" ]; then \
+# Run audit check worker
+run-audit-check env='local' apply='false':
+	ENV_RAW="{{env}}"; \
+	if [ "${ENV_RAW#env=}" != "${ENV_RAW}" ]; then ENV_VALUE="${ENV_RAW#env=}"; else ENV_VALUE="${ENV_RAW}"; fi; \
+	if [ "${ENV_VALUE}" = "prod" ]; then \
+		COMPOSE_FILE="docker-compose-prod.yml"; \
+		SERVICE="orchestrator"; \
+	else \
+		COMPOSE_FILE="docker-compose-local.yml"; \
+		SERVICE="orchestrator-dev"; \
+	fi; \
+	if [ "{{apply}}" = "true" ]; then \
 		AUDIT_FLAGS="--audit-apply"; \
 	else \
 		AUDIT_FLAGS=""; \
 	fi; \
-	docker compose --file docker-compose-local.yml exec orchestrator-dev \
+	docker compose --file "$COMPOSE_FILE" exec "$SERVICE" \
 		python -m orchestrator.workers audit-check $AUDIT_FLAGS
 
 # Backwards-compatible alias for audit check
-run-audit-once apply='false':
-	@just run-audit-check-once apply={{apply}}
+run-audit env='local' apply='false':
+	@just run-audit-check env={{env}} apply={{apply}}
 
-# Run all workers once (metagraph + score ETL) on local stack
-run-workers-once:
-	docker compose --file docker-compose-local.yml exec orchestrator-dev \
-		python -m orchestrator.workers all
-
-# Run all workers once (metagraph + score ETL) on prod stack
-run-workers-once-prod:
-	docker compose --file docker-compose-prod.yml exec orchestrator \
-		python -m orchestrator.workers all
+# Run all workers (metagraph + score ETL)
+run-workers env='local' hotkey='':
+	ENV_RAW="{{env}}"; \
+	if [ "${ENV_RAW#env=}" != "${ENV_RAW}" ]; then ENV_VALUE="${ENV_RAW#env=}"; else ENV_VALUE="${ENV_RAW}"; fi; \
+	if [ "${ENV_VALUE}" = "prod" ]; then \
+		COMPOSE_FILE="docker-compose-prod.yml"; \
+		SERVICE="orchestrator"; \
+	else \
+		COMPOSE_FILE="docker-compose-local.yml"; \
+		SERVICE="orchestrator-dev"; \
+	fi; \
+	if [ -n "{{hotkey}}" ]; then \
+		HOTKEY_FLAG="--hotkey {{hotkey}}"; \
+	else \
+		HOTKEY_FLAG=""; \
+	fi; \
+	docker compose --file "$COMPOSE_FILE" exec "$SERVICE" \
+		python -m orchestrator.workers all $HOTKEY_FLAG
 
 # ═══════════════════════════════════════════════════════════════════════════
 # DATABASE MANAGEMENT

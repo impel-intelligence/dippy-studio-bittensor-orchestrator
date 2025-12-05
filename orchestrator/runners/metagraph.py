@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
 from orchestrator.domain.miner import Miner
 from orchestrator.common.model_utils import dump_model
 from orchestrator.common.structured_logging import StructuredLogger
+from orchestrator.runners.base import InstrumentedRunner
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 
 if TYPE_CHECKING:
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 StateResult = Tuple[dict[str, Miner], Optional[int]]
 
 
-class MetagraphStateRunner:
+class MetagraphStateRunner(InstrumentedRunner[dict[str, Any]]):
     """Fetch, validate, and persist a single snapshot of the metagraph state."""
 
     def __init__(
@@ -35,19 +36,10 @@ class MetagraphStateRunner:
         self._network = network
         self._fetch_subnet_state = subnet_fetcher
         self._subnet_state_client = subnet_state_client
-        self._logger: StructuredLogger | logging.Logger = (
-            logger if logger is not None else logging.getLogger(__name__)
-        )
+        super().__init__(name="metagraph.sync", logger=logger)
 
-    async def run_once(self) -> None:
+    async def _run(self) -> dict[str, Any] | None:
         """Execute one metagraph refresh cycle."""
-        self._log(
-            "info",
-            "metagraph.sync.start",
-            netuid=self._netuid,
-            network=self._network,
-        )
-
         try:
             state_result = await asyncio.to_thread(
                 self._fetch_subnet_state,
@@ -62,7 +54,7 @@ class MetagraphStateRunner:
                 network=self._network,
                 error=str(exc),
             )
-            return
+            return None
 
         if state_result is None:
             self._log(
@@ -71,7 +63,7 @@ class MetagraphStateRunner:
                 netuid=self._netuid,
                 network=self._network,
             )
-            return
+            return None
 
         state, block = state_result
 
@@ -86,8 +78,9 @@ class MetagraphStateRunner:
                 network=self._network,
                 error=str(exc),
             )
-            return
+            return None
 
+        enriched_state = validated_state
         try:
             enriched_state = self._populate_alpha_stake(validated_state)
         except Exception as exc:  # pragma: no cover - logging safeguard
@@ -117,21 +110,16 @@ class MetagraphStateRunner:
                 network=self._network,
                 error=str(exc),
             )
-            return
-
-        self._log(
-            "info",
-            "metagraph.sync.complete",
-            block=block,
-            miner_count=len(validated_state),
-            netuid=self._netuid,
-            network=self._network,
-            client_instance_id=getattr(self._miner_metagraph_client, "instance_id", None),
-            client_db_path=getattr(self._miner_metagraph_client, "db_path", None),
-        )
+            return None
 
         if self._should_log_debug():
             self._log_debug_state(block=block)
+        return {
+            "block": block,
+            "miner_count": len(validated_state),
+            "client_instance_id": getattr(self._miner_metagraph_client, "instance_id", None),
+            "client_db_path": getattr(self._miner_metagraph_client, "db_path", None),
+        }
 
     def _populate_alpha_stake(self, state: Dict[str, Miner]) -> Dict[str, Miner]:
         if not state:
@@ -143,6 +131,14 @@ class MetagraphStateRunner:
             netuid=self._netuid,
             network=self._network,
         )
+
+    def _start_fields(self) -> Dict[str, Any]:
+        return {"netuid": self._netuid, "network": self._network}
+
+    def _complete_fields(self, result: dict[str, Any] | None, start_fields: dict[str, Any]) -> dict[str, Any]:
+        if result is None:
+            return {**start_fields, "status": "skipped"}
+        return {**start_fields, "status": "success", **result}
 
     def _should_log_debug(self) -> bool:
         logger = self._logger
@@ -167,17 +163,3 @@ class MetagraphStateRunner:
             client_db_path=getattr(self._miner_metagraph_client, "db_path", None),
             miner_state=serialized_state,
         )
-
-    def _log(self, level: str, event: str, **fields: Any) -> None:
-        """Emit log entries using either structured or stdlib loggers."""
-        logger = self._logger
-        if isinstance(logger, StructuredLogger):
-            log_method = getattr(logger, level)
-            log_method(event, **fields)
-            return
-
-        log_method = getattr(logger, level)
-        if fields:
-            log_method("%s %s", event, fields)
-        else:
-            log_method(event)

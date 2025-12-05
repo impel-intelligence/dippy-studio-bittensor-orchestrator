@@ -29,7 +29,7 @@ async def _run_metagraph(orchestrator: Orchestrator) -> None:
         subnet_state_client=orchestrator.subnet_state_service,
         logger=orchestrator.server_context.logger,
     )
-    await runner.run_once()
+    await runner.execute()
     WORKER_LOGGER.info(
         "worker.metagraph.complete netuid=%s network=%s",
         orchestrator.config.subnet.netuid,
@@ -50,7 +50,7 @@ async def _run_score(orchestrator: Orchestrator, trace_hotkeys: Sequence[str] | 
         trace_hotkeys=list(trace_hotkeys or ()),
         logger=orchestrator.server_context.logger,
     )
-    summary = await runner.run_once()
+    summary = await runner.execute()
     if summary is None:
         WORKER_LOGGER.info(
             "worker.score.complete netuid=%s network=%s result=skipped",
@@ -81,16 +81,34 @@ async def _run_audit_seed(
         orchestrator.config.subnet.network,
         job_type or "img-h100_pcie",
     )
+    seed_cfg = getattr(orchestrator.config, "audit_seed", None)
+    redis_url = None
+    redis_namespace = "audit_seed"
+    dispatch_delay = 15.0
+    audit_limit = 10
+    if seed_cfg is not None:
+        redis_url = seed_cfg.redis_url or orchestrator.config.listen.sync.redis_url
+        redis_namespace = seed_cfg.redis_namespace
+        dispatch_delay = seed_cfg.dispatch_delay_seconds
+        audit_limit = seed_cfg.limit
+    else:  # pragma: no cover - defensive fallback for older configs
+        redis_url = orchestrator.config.listen.sync.redis_url
+
     runner = AuditSeedRunner(
         audit_service=orchestrator.audit_service,
         netuid=orchestrator.config.subnet.netuid,
         network=orchestrator.config.subnet.network,
         callback_url=orchestrator.config.callback.resolved_callback_url(),
+        audit_miner=orchestrator.audit_miner,
         preview_only=preview_only,
         job_type=job_type,
+        limit=audit_limit,
+        dispatch_delay_seconds=dispatch_delay,
+        redis_url=redis_url,
+        redis_namespace=redis_namespace,
         logger=orchestrator.server_context.logger,
     )
-    summary = await runner.run_once()
+    summary = await runner.execute()
     if summary is None:
         WORKER_LOGGER.info(
             "worker.audit_seed.complete netuid=%s network=%s result=skipped",
@@ -126,7 +144,7 @@ async def _run_audit_check(orchestrator: Orchestrator, *, apply_changes: bool = 
         audit_failure_repository=orchestrator.audit_failure_repository,
         logger=orchestrator.server_context.logger,
     )
-    summary = await runner.run_once()
+    summary = await runner.execute()
     if summary is None:
         WORKER_LOGGER.info(
             "worker.audit_check.complete netuid=%s network=%s result=skipped",
