@@ -39,9 +39,7 @@ class WebhookDispatcher:
         completed_at: str,
         error: Optional[str],
         latencies: Dict[str, Any],
-        image_bytes: Optional[bytes],
-        image_filename: Optional[str],
-        image_content_type: Optional[str],
+        image_url: Optional[str],
     ) -> bool:
         url = (webhook_url or "").strip()
         if not url:
@@ -55,9 +53,7 @@ class WebhookDispatcher:
             completed_at,
             error,
             latencies or {},
-            image_bytes,
-            image_filename,
-            image_content_type,
+            image_url,
         )
         return True
 
@@ -69,9 +65,7 @@ class WebhookDispatcher:
         completed_at: str,
         error: Optional[str],
         latencies: Dict[str, Any],
-        image_bytes: Optional[bytes],
-        image_filename: Optional[str],
-        image_content_type: Optional[str],
+        image_url: Optional[str],
     ) -> None:
         backoff = self._backoff
         for attempt in range(1, self._max_attempts + 1):
@@ -83,9 +77,7 @@ class WebhookDispatcher:
                     completed_at=completed_at,
                     error=error,
                     latencies=latencies,
-                    image_bytes=image_bytes,
-                    image_filename=image_filename,
-                    image_content_type=image_content_type,
+                    image_url=image_url,
                 )
                 logger.info(
                     "webhook.dispatch.success job_id=%s url=%s attempt=%s",
@@ -122,9 +114,7 @@ class WebhookDispatcher:
         completed_at: str,
         error: Optional[str],
         latencies: Dict[str, Any],
-        image_bytes: Optional[bytes],
-        image_filename: Optional[str],
-        image_content_type: Optional[str],
+        image_url: Optional[str],
     ) -> None:
         data: Dict[str, Any] = {
             "job_id": job_id,
@@ -138,16 +128,12 @@ class WebhookDispatcher:
                 continue
             data[key] = value
 
-        files = None
-        if image_bytes is not None:
-            filename = image_filename or f"{job_id}.bin"
-            content_type = image_content_type or "application/octet-stream"
-            files = {"image": (filename, image_bytes, content_type)}
+        if image_url:
+            data["image_url"] = image_url
 
         response = httpx.post(
             webhook_url,
             data=data,
-            files=files,
             timeout=self._timeout,
         )
         response.raise_for_status()

@@ -64,9 +64,7 @@ class _StubWebhookDispatcher:
         completed_at: str,
         error: str | None,
         latencies: dict,
-        image_bytes: bytes | None,
-        image_filename: str | None,
-        image_content_type: str | None,
+        image_url: str | None,
     ) -> bool:
         self.calls.append(
             {
@@ -76,9 +74,7 @@ class _StubWebhookDispatcher:
                 "completed_at": completed_at,
                 "error": error,
                 "latencies": latencies,
-                "has_image": image_bytes is not None,
-                "image_filename": image_filename,
-                "image_content_type": image_content_type,
+                "image_url": image_url,
             }
         )
         return self.succeed
@@ -156,7 +152,10 @@ async def test_process_callback_appends_image_hash(monkeypatch: pytest.MonkeyPat
 @pytest.mark.asyncio
 async def test_process_callback_forwards_to_webhook_when_present() -> None:
     dispatcher = _StubWebhookDispatcher()
-    service = CallbackService(webhook_dispatcher=dispatcher)
+    uploader = _StubUploader(
+        "https://storage.googleapis.com/dippy_studio_public/callbacks/image.png"
+    )
+    service = CallbackService(uploader=uploader, webhook_dispatcher=dispatcher)
     job = _FakeJob(payload={"webhook_url": "https://example.com/webhook"})
     job_service = _FakeJobService(job=job)
     job_id_str = str(job_service.job.job_id)
@@ -176,6 +175,7 @@ async def test_process_callback_forwards_to_webhook_when_present() -> None:
 
     assert status == "success"
     assert dispatcher.calls and dispatcher.calls[-1]["webhook_url"] == "https://example.com/webhook"
+    assert dispatcher.calls[-1]["image_url"] == "https://media.dippy-bittensor.studio/callbacks/image.png"
     assert job_service.updated_payload is not None
     assert job_service.updated_payload["callback_metadata"]["webhook_forwarded"] is True
 

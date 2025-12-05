@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Dict
 from uuid import UUID
@@ -16,8 +17,60 @@ from .duckdb_manager import JobRelayDuckDBManager
 from .models import InferenceJob, InferenceJobCreate, InferenceJobUpdate
 from .repository import InferenceJobRepository
 
+_OTEL_CONFIGURED = False
 LOGGER = logging.getLogger("jobrelay.app")
 AUTH_HEADER_NAME = "X-Service-Auth-Secret"
+
+
+def _configure_opentelemetry(app: FastAPI) -> None:
+    """Initialize OpenTelemetry tracing/metrics with OTLP exporters."""
+    global _OTEL_CONFIGURED
+    if _OTEL_CONFIGURED:
+        return
+    if os.getenv("OTEL_SDK_DISABLED", "").strip().lower() in {"1", "true", "yes", "y", "on"}:
+        LOGGER.info("OpenTelemetry disabled via OTEL_SDK_DISABLED")
+        return
+    try:
+        from opentelemetry import metrics, trace
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        from opentelemetry.instrumentation.requests import RequestsInstrumentor
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    except ImportError as exc:  # pragma: no cover
+        LOGGER.warning("OpenTelemetry not configured (missing packages): %s", exc)
+        return
+
+    base_otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318").rstrip("/")
+    traces_endpoint = os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or f"{base_otlp_endpoint}/v1/traces"
+    metrics_endpoint = os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") or f"{base_otlp_endpoint}/v1/metrics"
+
+    resource = Resource.create({"service.name": os.getenv("OTEL_SERVICE_NAME", "jobrelay")})
+
+    tracer_provider = TracerProvider(resource=resource)
+    tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=traces_endpoint)))
+    trace.set_tracer_provider(tracer_provider)
+
+    metric_exporter = OTLPMetricExporter(endpoint=metrics_endpoint)
+    meter_provider = MeterProvider(
+        resource=resource,
+        metric_readers=[PeriodicExportingMetricReader(metric_exporter)],
+    )
+    metrics.set_meter_provider(meter_provider)
+
+    FastAPIInstrumentor.instrument_app(
+        app,
+        tracer_provider=tracer_provider,
+        meter_provider=meter_provider,
+    )
+    RequestsInstrumentor().instrument()
+
+    _OTEL_CONFIGURED = True
+    LOGGER.info("OpenTelemetry configured for jobrelay (endpoint_base=%s)", base_otlp_endpoint)
 
 
 def create_app() -> FastAPI:
@@ -27,6 +80,7 @@ def create_app() -> FastAPI:
     processor = BackgroundJobProcessor(repository, settings, manager)
 
     app = FastAPI(title="Job Relay Service", version="0.1.0")
+    _configure_opentelemetry(app)
 
     app.state.settings = settings
     app.state.manager = manager

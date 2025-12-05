@@ -32,6 +32,10 @@ CALLBACK_SECRET_HEADER = "X-Callback-Secret"
 
 logger = logging.getLogger(__name__)
 
+_MEDIA_BASE_URL = "https://media.dippy-bittensor.studio"
+_MEDIA_BUCKET = "dippy_studio_public"
+_GCS_STORAGE_PREFIX = "https://storage.googleapis.com/"
+
 _FLUX_KONTEXT_MIN_RUNTIME_MS = 8_000
 
 class CallbackService:
@@ -100,6 +104,10 @@ class CallbackService:
             if image_hash:
                 image_info["image_sha256"] = image_hash
 
+        public_image_url = self._build_public_image_url(image_info.get("image_uri"))
+        if public_image_url:
+            image_info["image_url"] = public_image_url
+
         latencies = self._calculate_latencies(job, received_at)
         latency_failure_reason: Optional[str] = None
         if is_audit_job:
@@ -124,9 +132,7 @@ class CallbackService:
             completed_at=completed_at,
             error=error,
             latencies=latencies,
-            image_bytes=image_bytes,
-            image_filename=image_filename,
-            image_content_type=image_content_type,
+            image_url=image_info.get("image_url"),
         )
         result_payload = self._compose_result_payload(
             status=status,
@@ -145,7 +151,7 @@ class CallbackService:
             "callback.job_updated job_id=%s status=%s has_image=%s latencies=%s",
             job_id,
             status,
-            bool(image_info.get("image_uri")),
+            bool(image_info.get("image_uri") or image_info.get("image_url")),
             latency_snapshot or None,
         )
 
@@ -345,8 +351,33 @@ class CallbackService:
     @staticmethod
     def _resolve_fetch_url(image_uri: str) -> str:
         if image_uri.startswith("gs://"):
-            return f"https://storage.googleapis.com/{image_uri[5:]}"
+            return f"{_GCS_STORAGE_PREFIX}{image_uri[5:]}"
+        if image_uri.startswith(_MEDIA_BASE_URL):
+            path = image_uri[len(_MEDIA_BASE_URL) :].lstrip("/")
+            if path:
+                return f"{_GCS_STORAGE_PREFIX}{_MEDIA_BUCKET}/{path}"
+            return f"{_GCS_STORAGE_PREFIX}{_MEDIA_BUCKET}"
         return image_uri
+
+    @staticmethod
+    def _build_public_image_url(image_uri: Optional[str]) -> Optional[str]:
+        uri = image_uri.strip() if isinstance(image_uri, str) else ""
+        if not uri:
+            return None
+        if uri.startswith(_MEDIA_BASE_URL):
+            return uri
+        if uri.startswith("gs://"):
+            return CallbackService._build_public_image_url(f"{_GCS_STORAGE_PREFIX}{uri[5:]}")
+
+        if uri.startswith(_GCS_STORAGE_PREFIX):
+            suffix = uri[len(_GCS_STORAGE_PREFIX) :]
+            bucket_prefix = f"{_MEDIA_BUCKET}/"
+            if suffix.startswith(bucket_prefix):
+                path = suffix[len(bucket_prefix) :]
+                return f"{_MEDIA_BASE_URL}/{path}" if path else _MEDIA_BASE_URL
+            return uri
+
+        return uri
 
     @staticmethod
     def _extract_job_type(job: Any) -> Optional[str]:
@@ -430,11 +461,11 @@ class CallbackService:
         if latencies["latency_ms"] is not None:
             payload["latency_ms"] = latencies["latency_ms"]
 
-        if image_info.get("image_uri"):
+        if image_info:
             payload.update(image_info)
 
         callback_metadata = {
-            "has_image": bool(image_info.get("image_uri")),
+            "has_image": bool(image_info.get("image_uri") or image_info.get("image_url")),
             "secret_verified": True,
             "secret_provided": bool(provided_secret),
         }
@@ -547,9 +578,7 @@ class CallbackService:
         completed_at: str,
         error: Optional[str],
         latencies: Dict[str, Optional[int]],
-        image_bytes: Optional[bytes],
-        image_filename: Optional[str],
-        image_content_type: Optional[str],
+        image_url: Optional[str],
     ) -> bool:
         if not webhook_url:
             return False
@@ -570,9 +599,7 @@ class CallbackService:
                 completed_at=completed_at,
                 error=error,
                 latencies=latencies,
-                image_bytes=image_bytes,
-                image_filename=image_filename,
-                image_content_type=image_content_type,
+                image_url=image_url,
             )
         except Exception:  # noqa: BLE001 - defensive guard
             logger.exception(
@@ -587,7 +614,7 @@ class CallbackService:
                 "callback.webhook_forward_queued job_id=%s webhook_url=%s has_image=%s",
                 job_id,
                 webhook_url,
-                bool(image_bytes),
+                bool(image_url),
             )
         else:
             logger.warning(
@@ -620,6 +647,7 @@ class CallbackService:
                 "completed_at": payload.get("completed_at"),
                 "callback_received_at": callback_received_at,
                 "callback_metadata": payload.get("callback_metadata", {}),
+                "image_url": payload.get("image_url"),
                 "image_uri": payload.get("image_uri"),
                 "image_size": payload.get("image_size"),
                 "image_content_type": payload.get("image_content_type"),

@@ -22,6 +22,10 @@ services:
       - LISTEN_SYNC_REDIS_URL=redis://redis:6379/0
       - LISTEN_SYNC_REDIS_CHANNEL_PREFIX=listen_sync
       - LISTEN_SYNC_REDIS_TTL_SECONDS=600
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://signoz-otel-collector:4318
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - OTEL_SERVICE_NAME=orchestrator
+      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,provider_name=bittensor
     ports:
       - "${ORCHESTRATOR_PORT:-42169}:${ORCHESTRATOR_PORT:-42169}"
     depends_on:
@@ -77,6 +81,10 @@ services:
       - JOBRELAY_GCS_BUCKET=${JOBRELAY_GCS_BUCKET:-subnet11_internal}
       - JOBRELAY_GCP_CREDENTIALS_PATH=${JOBRELAY_GCP_CREDENTIALS_PATH:-/app/gcs_service_account.json}
       - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcs_service_account.json}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://signoz-otel-collector:4318
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - OTEL_SERVICE_NAME=jobrelay
+      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,provider_name=bittensor
     ports:
       - "8181:8181"
     depends_on:

@@ -28,6 +28,10 @@ services:
       - ENABLE_LOCAL_STUB_MINER=true
       - LOCAL_STUB_MINER_URL=http://stub-miner:${STUB_MINER_PORT:-8765}
       - LOCAL_STUB_MINER_HOTKEY=5EtM9iXMAYRsmt6aoQAoWNDX6yaBnjhmnEQhWKv8HpwkVtML
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://signoz-otel-collector:4318
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - OTEL_SERVICE_NAME=orchestrator
+      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=local,provider_name=bittensor
     env_file:
       - .env
     extra_hosts:
@@ -75,6 +79,10 @@ services:
       - JOBRELAY_GCS_BUCKET=${JOBRELAY_GCS_BUCKET:-subnet11_internal}
       - JOBRELAY_GCP_CREDENTIALS_PATH=${JOBRELAY_GCP_CREDENTIALS_PATH:-/app/gcs_service_account.json}
       - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcs_service_account.json}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://signoz-otel-collector:4318
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - OTEL_SERVICE_NAME=jobrelay
+      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=local,provider_name=bittensor
     env_file:
       - .env
 

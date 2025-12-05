@@ -920,6 +920,19 @@ class JobRelayDuckDBManager:
 
     def _coerce_snapshot_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
         parsed = dict(record)
+
+        def _clean_value(value: Any) -> Any:
+            # Treat pandas NA/NaT as missing to avoid serialization errors downstream.
+            try:
+                import pandas as pd  # type: ignore
+            except Exception:  # pragma: no cover - pandas available in runtime image
+                pd = None
+            if pd is not None and pd.isna(value):
+                return None
+            if pd is not None and isinstance(value, pd.Timestamp):
+                return value.to_pydatetime()
+            return value
+
         job_id = parsed.get("job_id")
         if job_id is not None:
             parsed["job_id"] = str(job_id)
@@ -937,6 +950,10 @@ class JobRelayDuckDBManager:
                 parsed["response_payload"] = json.loads(response_payload)
             except Exception:
                 LOGGER.debug("snapshot.response_payload_parse_failed", exc_info=True)
+
+        # Normalize any NaN/NaT sentinel values to None for safe Pydantic serialization.
+        for key, value in list(parsed.items()):
+            parsed[key] = _clean_value(value)
 
         return parsed
 

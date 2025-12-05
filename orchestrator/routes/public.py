@@ -338,7 +338,7 @@ def create_public_router() -> APIRouter:
         status_code=status.HTTP_200_OK,
     )
     async def get_recent_jobs(
-        limit: int = Query(1000, ge=1, le=1000, description="Number of recent jobs to return (max 1000)"),
+        limit: int = Query(100, ge=1, le=100, description="Number of recent jobs to return (max 100)"),
         job_service: JobService = Depends(get_job_service),
     ) -> RecentJobsResponse:
         try:
@@ -346,9 +346,10 @@ def create_public_router() -> APIRouter:
                 max_results=limit,
                 lookback_days=None,
             )
+            totals = await job_service.get_job_totals()
         except JobServiceError as exc:
             raise_job_service_error(exc)
-        return RecentJobsResponse(jobs=records, limit=limit)
+        return RecentJobsResponse(jobs=records, limit=limit, total_jobs=totals["total"])
 
     @router.get("/health", status_code=status.HTTP_200_OK)
     async def health(

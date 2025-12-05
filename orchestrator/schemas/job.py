@@ -137,7 +137,7 @@ class JobRecord(InferenceJob):
             completed_at = response_timestamp
             last_updated_at = response_timestamp
             if isinstance(response_payload, dict):
-                candidate_url = response_payload.get("image_uri")
+                candidate_url = response_payload.get("image_url") or response_payload.get("image_uri")
                 if isinstance(candidate_url, str) and candidate_url.strip():
                     result_image_url = candidate_url
                 candidate_hash = response_payload.get("image_sha256")
@@ -215,6 +215,7 @@ class CompletedJobsResponse(BaseModel):
 class RecentJobsResponse(BaseModel):
     jobs: List[Dict[str, Any]]
     limit: int
+    total_jobs: int
 
 
 def _to_job_status(status: Any) -> JobStatus:
