@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
-from typing import Iterator
+from typing import Any, Iterator
 
 import psycopg
 from psycopg import sql
@@ -533,3 +533,113 @@ def test_validate_state_preserves_manually_validated_miners(database_service: Po
 
     validated = client.validate_state(new_state)
     assert validated[hotkey].valid is True
+
+
+def test_validate_state_bans_failed_audits(database_service: PostgresClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = MinerMetagraphService(database_service)
+    hotkey = "hk-banned"
+    client.upsert_miner(
+        Miner(
+            uid=33,
+            network_address="https://existing",
+            valid=True,
+            alpha_stake=7,
+            hotkey=hotkey,
+            failed_audits=1,
+        )
+    )
+
+    monkeypatch.setattr(
+        "orchestrator.clients.miner_health_client.MinerHealthClient.check_network_health",
+        lambda self, address, hk: True,
+    )
+
+    new_state = {
+        hotkey: Miner(
+            uid=33,
+            network_address="https://reachable",
+            valid=True,
+            alpha_stake=7,
+            hotkey=hotkey,
+        )
+    }
+
+    validated = client.validate_state(new_state)
+    assert validated[hotkey].valid is False
+    assert validated[hotkey].failed_audits == 1
+
+
+class _StubJobRelay:
+    def __init__(self, payloads: dict[str, list[dict[str, Any]]] | None = None) -> None:
+        self._payloads = payloads or {}
+
+    async def list_jobs_for_hotkey(self, hotkey: str, since: Any = None) -> list[dict[str, Any]]:
+        return list(self._payloads.get(hotkey, []))
+
+
+class _StubJobService:
+    def __init__(self, payloads: dict[str, list[dict[str, Any]]] | None = None) -> None:
+        self.job_relay = _StubJobRelay(payloads)
+
+
+def test_score_etl_zeroes_invalid_miners(database_service: PostgresClient) -> None:
+    metagraph = MinerMetagraphService(database_service)
+    hotkey_valid = "hk-valid-score"
+    hotkey_invalid = "hk-invalid-score"
+
+    metagraph.update_state(
+        {
+            hotkey_valid: Miner(
+                uid=100,
+                network_address="https://valid.example",
+                valid=True,
+                alpha_stake=10,
+                capacity={},
+                hotkey=hotkey_valid,
+            ),
+            hotkey_invalid: Miner(
+                uid=101,
+                network_address="https://invalid.example",
+                valid=False,
+                alpha_stake=5,
+                capacity={},
+                hotkey=hotkey_invalid,
+                failed_audits=2,
+            ),
+        }
+    )
+
+    job_payloads = {
+        hotkey_valid: [
+            {
+                "job_id": "job-success",
+                "status": "success",
+                "job_type": "img-h100_pcie",
+                "is_audit_job": False,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "metrics": {"latency_ms": 1_000},
+            }
+        ]
+    }
+
+    score_service = ScoreService(
+        database_service,
+        job_service=_StubJobService(job_payloads),
+        miner_metagraph_service=metagraph,
+        netuid=1,
+        network="testnet",
+    )
+
+    score_service.put(hotkey_invalid, ScoreRecord(scores=0.75))
+
+    summary = asyncio.run(score_service.run_once())
+    assert summary is not None
+    assert summary.hotkeys_considered == 2
+
+    invalid_record = score_service.get(hotkey_invalid)
+    valid_record = score_service.get(hotkey_valid)
+
+    assert invalid_record is not None
+    assert invalid_record.scores == pytest.approx(0.0)
+    assert valid_record is not None
+    assert valid_record.scores > 0.0

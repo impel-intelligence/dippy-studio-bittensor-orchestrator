@@ -290,8 +290,10 @@ def create_public_router() -> APIRouter:
             for hotkey, record in stored_scores.items():
                 miner = metagraph_state.get(hotkey)
                 failed_audits = getattr(miner, "failed_audits", 0) if miner else 0
-                status_value = "SLASHED" if failed_audits else "COMPLETED"
-                total_score = 0.0 if failed_audits else float(record.scores)
+                is_invalid = miner is not None and not bool(getattr(miner, "valid", True))
+                slashed = failed_audits > 0 or is_invalid
+                status_value = "SLASHED" if slashed else "COMPLETED"
+                total_score = 0.0 if slashed else float(record.scores)
                 scores_payload[hotkey] = ScorePayload(
                     status=status_value,
                     score=ScoreValue(total_score=total_score),

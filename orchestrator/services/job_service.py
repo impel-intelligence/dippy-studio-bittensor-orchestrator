@@ -30,9 +30,29 @@ from orchestrator.services.exceptions import (
     JobServiceError,
     JobValidationError,
 )
+from orchestrator.services.metrics import record_job_created
 from sn_uuid import uuid7
 
+try:
+    from opentelemetry import trace
+    _tracer = trace.get_tracer(__name__)
+except ImportError:
+    trace = None  # type: ignore
+    _tracer = None
+
 logger = logging.getLogger(__name__)
+
+
+def _set_span_attributes(**attributes: Any) -> None:
+    """Set attributes on the current span if tracing is available."""
+    if trace is None:
+        return
+    span = trace.get_current_span()
+    if span is None:
+        return
+    for key, value in attributes.items():
+        if value is not None:
+            span.set_attribute(key, str(value) if not isinstance(value, (bool, int, float)) else value)
 
 
 class JobWaitTimeoutError(TimeoutError):
@@ -92,6 +112,33 @@ class JobService:
             }
 
             await self.job_relay.create_job(job_identifier, relay_payload)
+
+            # Log job creation for observability with structured attributes
+            job_type_str = self._job_type_to_str(job_type)
+            logger.info(
+                "job.created",
+                extra={
+                    "job_id": str(job_identifier),
+                    "job_type": job_type_str,
+                    "miner_hotkey": hotkey,
+                    "seed": seed,
+                    "event": "job.created",
+                },
+            )
+
+            # Add span attributes for trace correlation
+            _set_span_attributes(
+                job_id=str(job_identifier),
+                job_type=job_type_str,
+                miner_hotkey=hotkey,
+                job_status="pending",
+            )
+
+            # Record job creation metric
+            record_job_created(
+                job_type=job_type_str,
+                miner_hotkey=hotkey,
+            )
 
             job_request = JobRequest(
                 job_type=job_type,

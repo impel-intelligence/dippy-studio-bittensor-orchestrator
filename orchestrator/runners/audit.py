@@ -873,7 +873,7 @@ class AuditCheckRunner(_BaseAuditRunner):
         if miner is None:
             return None
         failed_audits = getattr(miner, "failed_audits", 0) or 0
-        updated = miner.model_copy(update={"failed_audits": failed_audits + 1})
+        updated = miner.model_copy(update={"failed_audits": failed_audits + 1, "valid": False})
         return self._miner_client.upsert_miner(updated)
 
     def _record_failure(

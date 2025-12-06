@@ -7,6 +7,7 @@ import logging
 from typing import Iterable, Sequence
 
 from orchestrator.runners.audit import AuditCheckRunner, AuditSeedRunner
+from orchestrator.runners.audit_broadcast import AuditBroadcastRunner
 from orchestrator.runners.metagraph import MetagraphStateRunner
 from orchestrator.runners.score_etl import ScoreETLRunner
 from orchestrator.runners.seed_requests import SeedRequestsRunner
@@ -167,6 +168,53 @@ async def _run_audit_check(orchestrator: Orchestrator, *, apply_changes: bool = 
     )
 
 
+async def _run_audit_broadcast(orchestrator: Orchestrator) -> None:
+    WORKER_LOGGER.info(
+        "worker.audit_broadcast.start netuid=%s network=%s",
+        orchestrator.config.subnet.netuid,
+        orchestrator.config.subnet.network,
+    )
+
+    listen_service = ListenService(
+        job_service=orchestrator.job_service,
+        metagraph=orchestrator.miner_metagraph_service,
+        logger=orchestrator.server_context.logger,
+        callback_url=orchestrator.config.callback.resolved_callback_url(),
+        epistula_client=orchestrator.epistula_client,
+    )
+
+    runner = AuditBroadcastRunner(
+        job_service=orchestrator.job_service,
+        miner_metagraph_service=orchestrator.miner_metagraph_service,
+        score_service=orchestrator.score_service,
+        listen_service=listen_service,
+        audit_miner=orchestrator.audit_miner,
+        netuid=orchestrator.config.subnet.netuid,
+        network=orchestrator.config.subnet.network,
+        logger=orchestrator.server_context.logger,
+    )
+    summary = await runner.execute()
+    if summary is None:
+        WORKER_LOGGER.info(
+            "worker.audit_broadcast.complete netuid=%s network=%s result=skipped",
+            orchestrator.config.subnet.netuid,
+            orchestrator.config.subnet.network,
+        )
+        return
+
+    WORKER_LOGGER.info(
+        "worker.audit_broadcast.complete netuid=%s network=%s miners=%s dispatched=%s completed=%s failures=%s mismatches=%s audit_job_id=%s",
+        orchestrator.config.subnet.netuid,
+        orchestrator.config.subnet.network,
+        summary.miners_considered,
+        summary.dispatched,
+        summary.completed,
+        summary.failures,
+        summary.mismatches,
+        summary.audit_job_id,
+    )
+
+
 async def _run_seed_requests(orchestrator: Orchestrator) -> None:
     WORKER_LOGGER.info(
         "worker.seed_requests.start netuid=%s network=%s",
@@ -234,6 +282,8 @@ async def _run_targets(
             await _run_audit_check(orchestrator, apply_changes=audit_apply_changes)
         elif normalized == "audit":
             await _run_audit_check(orchestrator, apply_changes=audit_apply_changes)
+        elif normalized == "audit-broadcast":
+            await _run_audit_broadcast(orchestrator)
         elif normalized == "seed-requests":
             await _run_seed_requests(orchestrator)
         else:

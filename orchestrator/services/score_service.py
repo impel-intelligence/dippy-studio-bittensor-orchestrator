@@ -443,6 +443,20 @@ class ScoreEngine:
                 ",".join(trace_targets),
             )
 
+        invalid_hotkeys: set[str] = set()
+        if self._miner_metagraph_service is not None:
+            try:
+                state_snapshot = self._miner_metagraph_service.dump_state()
+            except Exception as exc:  # pragma: no cover - defensive snapshot guard
+                logger.debug("score_engine.invalid_hotkeys.snapshot_failed", exc_info=exc)
+                state_snapshot = {}
+
+            invalid_hotkeys = {
+                hotkey
+                for hotkey, miner in state_snapshot.items()
+                if not bool(getattr(miner, "valid", False))
+            }
+
         scoped_hotkeys = await self._resolve_hotkeys()
         if scoped_hotkeys:
             normalized_hotkeys = self._normalize_hotkeys(scoped_hotkeys)
@@ -452,7 +466,7 @@ class ScoreEngine:
         if trace_targets:
             normalized_hotkeys = self._normalize_hotkeys(normalized_hotkeys + trace_targets)
 
-        if not normalized_hotkeys:
+        if not normalized_hotkeys and not invalid_hotkeys:
             logger.info("score_engine.run.skipped reason=%s", "no_hotkeys")
             return None
 
@@ -465,13 +479,17 @@ class ScoreEngine:
         )
 
         window_reference = datetime.now(timezone.utc)
-        completed_jobs, fetch_failures = await self.fetch_completed_jobs(
-            normalized_hotkeys,
-            lookback_days=self._lookback_days,
-            reference_time=window_reference,
-        )
-        for hotkey in normalized_hotkeys:
-            completed_jobs.setdefault(hotkey, [])
+        completed_jobs: Dict[str, list[Mapping[str, Any]]] = {}
+        fetch_failures: set[str] = set()
+
+        if normalized_hotkeys:
+            completed_jobs, fetch_failures = await self.fetch_completed_jobs(
+                normalized_hotkeys,
+                lookback_days=self._lookback_days,
+                reference_time=window_reference,
+            )
+            for hotkey in normalized_hotkeys:
+                completed_jobs.setdefault(hotkey, [])
 
         jobs_considered = sum(len(jobs) for jobs in completed_jobs.values())
 
@@ -551,13 +569,35 @@ class ScoreEngine:
                     record_score,
                 )
 
+        if invalid_hotkeys:
+            for hotkey in invalid_hotkeys:
+                failure_count = 0
+                existing_record = stored_scores.get(hotkey)
+                if existing_record is not None:
+                    try:
+                        failure_count = int(getattr(existing_record, "failure_count", 0))
+                    except (TypeError, ValueError):
+                        failure_count = 0
+                score_records[hotkey] = ScoreRecord(scores=0.0, failure_count=failure_count)
+                if trace_targets and hotkey in trace_targets:
+                    trace_details.setdefault(
+                        hotkey,
+                        {
+                            "considered": False,
+                            "jobs_fetched": 0,
+                            "job_statuses": [],
+                            "fetch_failed": False,
+                        },
+                    )["score"] = 0.0
+
         zeroed_hotkeys = sum(1 for record in score_records.values() if float(record.scores) <= 0.0)
 
         persisted = self.update_scores(score_records)
 
+        hotkeys_considered = len(set(normalized_hotkeys).union(invalid_hotkeys))
         summary = ScoreRunSummary(
             timestamp=reference_now,
-            hotkeys_considered=len(normalized_hotkeys),
+            hotkeys_considered=hotkeys_considered,
             hotkeys_updated=len(score_records),
             zeroed_hotkeys=zeroed_hotkeys,
             jobs_considered=jobs_considered,
@@ -1201,7 +1241,9 @@ async def build_scores_from_state(
     async def _score_hotkey(hotkey: str, miner: Miner) -> tuple[str, ScorePayload, dict[str, Any]]:
         async with semaphore:
             failed_audits = int(getattr(miner, "failed_audits", 0) or 0)
-            status_value = "SLASHED" if failed_audits else "COMPLETED"
+            is_invalid = not bool(getattr(miner, "valid", True))
+            slashed = failed_audits > 0 or is_invalid
+            status_value = "SLASHED" if slashed else "COMPLETED"
             try:
                 jobs = await job_relay_client.list_jobs_for_hotkey(hotkey, since=cutoff)
             except Exception as exc:  # pragma: no cover - defensive network logging
@@ -1236,7 +1278,7 @@ async def build_scores_from_state(
                 logger=logger,
             )
 
-            score_total = 0.0 if failed_audits else float(history.scores)
+            score_total = 0.0 if slashed else float(history.scores)
             payload = ScorePayload(
                 status=status_value,
                 score=ScoreValue(total_score=score_total),

@@ -180,6 +180,20 @@ run-audit-check env='local' apply='false':
 run-audit env='local' apply='false':
 	@just run-audit-check env={{env}} apply={{apply}}
 
+# Run audit broadcast worker
+run-audit-broadcast env='local':
+	ENV_RAW="{{env}}"; \
+	if [ "${ENV_RAW#env=}" != "${ENV_RAW}" ]; then ENV_VALUE="${ENV_RAW#env=}"; else ENV_VALUE="${ENV_RAW}"; fi; \
+	if [ "${ENV_VALUE}" = "prod" ]; then \
+		COMPOSE_FILE="docker-compose-prod.yml"; \
+		SERVICE="orchestrator"; \
+	else \
+		COMPOSE_FILE="docker-compose-local.yml"; \
+		SERVICE="orchestrator-dev"; \
+	fi; \
+	docker compose --file "$COMPOSE_FILE" exec "$SERVICE" \
+		python -m orchestrator.workers audit-broadcast
+
 # Run all workers (metagraph + score ETL)
 run-workers env='local' hotkey='':
 	ENV_RAW="{{env}}"; \

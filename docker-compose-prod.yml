@@ -63,6 +63,10 @@ services:
       - FORWARDER_LISTEN_AUTH_SECRET=${LISTEN_AUTH_SECRET:-orchestrator-listen-secret}
       - FORWARDER_JOB_TYPE=${FORWARDER_JOB_TYPE:-base-h100_pcie}
       - FORWARDER_TIMEOUT_SECONDS=${FORWARDER_TIMEOUT_SECONDS:-10}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://signoz-otel-collector:4318
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - OTEL_SERVICE_NAME=forwarder
+      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,provider_name=bittensor
     ports:
       - "${FORWARDER_PORT:-9871}:${FORWARDER_PORT:-9871}"
     depends_on:
@@ -71,6 +75,11 @@ services:
     restart: unless-stopped
     volumes:
       - .:/app
+    extra_hosts:
+      - "signoz-otel-collector:host-gateway"
+    networks:
+      - default
+      - signoz-net
 
   jobrelay:
     container_name: jobrelay-prod

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import random
+import logging
 import os
+import random
 from typing import Any
 
 import httpx
@@ -9,7 +10,126 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+_OTEL_CONFIGURED = False
+LOGGER = logging.getLogger("forwarder.app")
 LISTEN_AUTH_HEADER = "X-Service-Auth-Secret"
+
+
+def _configure_opentelemetry(app: FastAPI) -> None:
+    """Initialize OpenTelemetry tracing/metrics/logging with OTLP exporters.
+
+    Configures trace-log correlation by:
+    1. Setting up OTLP exporters for traces, metrics, and logs
+    2. Using LoggingInstrumentor to inject trace context into log records
+    3. Attaching LoggingHandler to export logs with trace_id/span_id attributes
+    """
+    global _OTEL_CONFIGURED
+    if _OTEL_CONFIGURED:
+        return
+    if os.getenv("OTEL_SDK_DISABLED", "").strip().lower() in {"1", "true", "yes", "y", "on"}:
+        LOGGER.info("OpenTelemetry disabled via OTEL_SDK_DISABLED")
+        return
+    try:
+        from opentelemetry import metrics, trace
+        from opentelemetry._logs import set_logger_provider
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        from opentelemetry.instrumentation.logging import LoggingInstrumentor
+        from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+        from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    except ImportError as exc:  # pragma: no cover
+        LOGGER.warning("OpenTelemetry not configured (missing packages): %s", exc)
+        return
+
+    base_otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318").rstrip("/")
+    traces_endpoint = os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or f"{base_otlp_endpoint}/v1/traces"
+    metrics_endpoint = os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") or f"{base_otlp_endpoint}/v1/metrics"
+    logs_endpoint = os.getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") or f"{base_otlp_endpoint}/v1/logs"
+
+    # Parse OTEL_RESOURCE_ATTRIBUTES for additional resource attributes
+    resource_attrs = {"service.name": os.getenv("OTEL_SERVICE_NAME", "forwarder")}
+    otel_resource_attrs = os.getenv("OTEL_RESOURCE_ATTRIBUTES", "")
+    if otel_resource_attrs:
+        for attr in otel_resource_attrs.split(","):
+            if "=" in attr:
+                key, value = attr.split("=", 1)
+                resource_attrs[key.strip()] = value.strip()
+
+    resource = Resource.create(resource_attrs)
+
+    # 1. Configure Tracing
+    tracer_provider = TracerProvider(resource=resource)
+    tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=traces_endpoint)))
+    trace.set_tracer_provider(tracer_provider)
+
+    # 2. Configure Metrics
+    metric_exporter = OTLPMetricExporter(endpoint=metrics_endpoint)
+    meter_provider = MeterProvider(
+        resource=resource,
+        metric_readers=[PeriodicExportingMetricReader(metric_exporter)],
+    )
+    metrics.set_meter_provider(meter_provider)
+
+    # 3. Configure Logging with OTLP export
+    logger_provider = LoggerProvider(resource=resource)
+    logger_provider.add_log_record_processor(
+        BatchLogRecordProcessor(OTLPLogExporter(endpoint=logs_endpoint)),
+    )
+    set_logger_provider(logger_provider)
+
+    # 4. CRITICAL: Instrument logging BEFORE creating handlers
+    LoggingInstrumentor().instrument(set_logging_format=True)
+
+    # 5. Create OTEL handler that exports logs with trace context
+    otel_logging_handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
+
+    # 6. Create console handler with trace context format
+    console_format = (
+        "%(asctime)s %(levelname)s [%(name)s] [trace_id=%(otelTraceID)s span_id=%(otelSpanID)s] - %(message)s"
+    )
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter(console_format))
+
+    # 7. Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers.clear()
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(otel_logging_handler)
+
+    # 8. Configure specific loggers
+    for logger_name in ("forwarder", "forwarder.app", "uvicorn", "uvicorn.error", "uvicorn.access"):
+        lgr = logging.getLogger(logger_name)
+        lgr.handlers.clear()
+        lgr.addHandler(console_handler)
+        lgr.addHandler(otel_logging_handler)
+        lgr.propagate = False
+        lgr.setLevel(logging.INFO)
+
+    # 9. Instrument FastAPI and HTTPX
+    FastAPIInstrumentor.instrument_app(
+        app,
+        tracer_provider=tracer_provider,
+        meter_provider=meter_provider,
+    )
+    HTTPXClientInstrumentor().instrument()
+
+    _OTEL_CONFIGURED = True
+    LOGGER.info(
+        "OpenTelemetry configured for forwarder (endpoint_base=%s, resource=%s)",
+        base_otlp_endpoint,
+        resource_attrs,
+    )
+
+
 DEFAULT_LISTEN_SECRET = "orchestrator-listen-secret"
 DEFAULT_JOB_TYPE = "base-h100_pcie"
 DEFAULT_ORCHESTRATOR_URL = "http://orchestrator:42169"
@@ -46,6 +166,7 @@ class ForwardRequest(BaseModel):
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     app = FastAPI(title="Forwarder", version="0.1.0")
+    _configure_opentelemetry(app)
 
     app.state.settings = settings
     app.state.http_client = None

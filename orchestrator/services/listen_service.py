@@ -12,6 +12,25 @@ from orchestrator.domain.miner import Miner
 from orchestrator.services.job_service import JobService
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.services.exceptions import MinerSelectionError
+
+try:
+    from opentelemetry import trace
+except ImportError:
+    trace = None  # type: ignore
+
+
+def _set_span_attributes(**attributes: Any) -> None:
+    """Set attributes on the current span if tracing is available."""
+    if trace is None:
+        return
+    span = trace.get_current_span()
+    if span is None:
+        return
+    for key, value in attributes.items():
+        if value is not None:
+            span.set_attribute(key, str(value) if not isinstance(value, (bool, int, float)) else value)
+
+
 TEMP_OVERRIDE_STEPS = 10
 
 
@@ -176,6 +195,13 @@ class ListenService:
             status_code=status_code,
             response_preview=response_text[:200],
         )
+
+        # Add span attributes for dispatch
+        _set_span_attributes(
+            job_status="dispatched",
+            miner_url=inference_url,
+            dispatch_status_code=status_code,
+        )
         return True
 
     async def _fail_job(
@@ -192,6 +218,12 @@ class ListenService:
             job_id=str(job_id),
             reason=reason,
             **log_fields,
+        )
+
+        # Add span attributes for failure
+        _set_span_attributes(
+            job_status="failed",
+            failure_reason=reason,
         )
 
     def _record_request_failure(self, miner: Miner, *, reason: str) -> None:

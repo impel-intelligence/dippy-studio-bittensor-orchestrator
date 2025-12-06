@@ -36,7 +36,13 @@ logger = logging.getLogger(__name__)
 
 
 def _configure_opentelemetry(app: FastAPI) -> None:
-    """Initialize OpenTelemetry tracing/metrics with OTLP exporters."""
+    """Initialize OpenTelemetry tracing/metrics with OTLP exporters.
+
+    Configures trace-log correlation by:
+    1. Setting up OTLP exporters for traces, metrics, and logs
+    2. Using LoggingInstrumentor to inject trace context into log records
+    3. Attaching LoggingHandler to export logs with trace_id/span_id attributes
+    """
     global _OTEL_CONFIGURED
     if _OTEL_CONFIGURED:
         return
@@ -45,13 +51,14 @@ def _configure_opentelemetry(app: FastAPI) -> None:
         return
     try:
         from opentelemetry import metrics, trace
+        from opentelemetry._logs import set_logger_provider
         from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
         from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         from opentelemetry.instrumentation.logging import LoggingInstrumentor
         from opentelemetry.instrumentation.requests import RequestsInstrumentor
-        from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler, set_logger_provider
+        from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
         from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
@@ -67,12 +74,23 @@ def _configure_opentelemetry(app: FastAPI) -> None:
     metrics_endpoint = os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") or f"{base_otlp_endpoint}/v1/metrics"
     logs_endpoint = os.getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") or f"{base_otlp_endpoint}/v1/logs"
 
-    resource = Resource.create({"service.name": os.getenv("OTEL_SERVICE_NAME", "orchestrator")})
+    # Parse OTEL_RESOURCE_ATTRIBUTES for additional resource attributes
+    resource_attrs = {"service.name": os.getenv("OTEL_SERVICE_NAME", "orchestrator")}
+    otel_resource_attrs = os.getenv("OTEL_RESOURCE_ATTRIBUTES", "")
+    if otel_resource_attrs:
+        for attr in otel_resource_attrs.split(","):
+            if "=" in attr:
+                key, value = attr.split("=", 1)
+                resource_attrs[key.strip()] = value.strip()
 
+    resource = Resource.create(resource_attrs)
+
+    # 1. Configure Tracing
     tracer_provider = TracerProvider(resource=resource)
     tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=traces_endpoint)))
     trace.set_tracer_provider(tracer_provider)
 
+    # 2. Configure Metrics
     metric_exporter = OTLPMetricExporter(endpoint=metrics_endpoint)
     meter_provider = MeterProvider(
         resource=resource,
@@ -80,28 +98,47 @@ def _configure_opentelemetry(app: FastAPI) -> None:
     )
     metrics.set_meter_provider(meter_provider)
 
+    # 3. Configure Logging with OTLP export
     logger_provider = LoggerProvider(resource=resource)
     logger_provider.add_log_record_processor(
         BatchLogRecordProcessor(OTLPLogExporter(endpoint=logs_endpoint)),
     )
     set_logger_provider(logger_provider)
 
+    # 4. CRITICAL: Instrument logging BEFORE creating handlers
+    # This ensures trace context (trace_id, span_id) is injected into ALL log records
+    # The LoggingInstrumentor patches the logging module to add otelTraceID/otelSpanID
     LoggingInstrumentor().instrument(set_logging_format=True)
+
+    # 5. Create OTEL handler that exports logs with trace context as attributes
+    # The LoggingHandler automatically extracts trace context from the current span
     otel_logging_handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
+
+    # 6. Create console handler with trace context in format for debugging
+    console_format = (
+        "%(asctime)s %(levelname)s [%(name)s] [trace_id=%(otelTraceID)s span_id=%(otelSpanID)s] - %(message)s"
+    )
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter(console_format))
+
+    # 7. Configure root logger with both handlers
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
-    if not any(isinstance(handler, LoggingHandler) for handler in root_logger.handlers):
-        root_logger.addHandler(otel_logging_handler)
+    root_logger.handlers.clear()
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(otel_logging_handler)
 
-    orch_logger = logging.getLogger("orchestrator")
-    if not any(isinstance(handler, LoggingHandler) for handler in orch_logger.handlers):
-        orch_logger.addHandler(otel_logging_handler)
-
-    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    # 8. Configure specific loggers to ensure they use our handlers
+    # Set propagate=True for most loggers so logs bubble up to root with OTEL handler
+    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access", "orchestrator"):
         lgr = logging.getLogger(logger_name)
-        if not any(isinstance(handler, LoggingHandler) for handler in lgr.handlers):
-            lgr.addHandler(otel_logging_handler)
+        lgr.handlers.clear()
+        lgr.addHandler(console_handler)
+        lgr.addHandler(otel_logging_handler)
+        lgr.propagate = False
+        lgr.setLevel(logging.INFO)
 
+    # 9. Instrument FastAPI and requests
     FastAPIInstrumentor.instrument_app(
         app,
         tracer_provider=tracer_provider,
@@ -110,7 +147,11 @@ def _configure_opentelemetry(app: FastAPI) -> None:
     RequestsInstrumentor().instrument()
 
     _OTEL_CONFIGURED = True
-    logger.info("OpenTelemetry configured for orchestrator (endpoint_base=%s)", base_otlp_endpoint)
+    logger.info(
+        "OpenTelemetry configured for orchestrator (endpoint_base=%s, resource=%s)",
+        base_otlp_endpoint,
+        resource_attrs,
+    )
 
 __all__ = ["orchestrator"]
 

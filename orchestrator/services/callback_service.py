@@ -26,6 +26,29 @@ from orchestrator.services.exceptions import (
     CallbackSecretMissing,
     CallbackValidationError,
 )
+from orchestrator.services.metrics import (
+    record_job_completed,
+    record_job_failed,
+    CallbackTimer,
+    ImageUploadTimer,
+)
+
+try:
+    from opentelemetry import trace
+except ImportError:
+    trace = None  # type: ignore
+
+
+def _set_span_attributes(**attributes: Any) -> None:
+    """Set attributes on the current span if tracing is available."""
+    if trace is None:
+        return
+    span = trace.get_current_span()
+    if span is None:
+        return
+    for key, value in attributes.items():
+        if value is not None:
+            span.set_attribute(key, str(value) if not isinstance(value, (bool, int, float)) else value)
 
 
 CALLBACK_SECRET_HEADER = "X-Callback-Secret"
@@ -72,6 +95,15 @@ class CallbackService:
 
         is_audit_job = self._is_audit_job(job)
         job_type = self._extract_job_type(job)
+        miner_hotkey = getattr(job, "hotkey", None)
+
+        # Add span attributes for callback processing
+        _set_span_attributes(
+            job_id=job_id,
+            job_type=job_type,
+            miner_hotkey=miner_hotkey,
+            is_audit_job=is_audit_job,
+        )
 
         await self._verify_secret(job, provided_secret, job_service, job_uuid)
 
@@ -155,12 +187,16 @@ class CallbackService:
             latency_snapshot or None,
         )
 
+        miner_hotkey = getattr(job, "hotkey", None)
         response_status = await self._finalize_status(
             job_service=job_service,
             job_uuid=job_uuid,
             status=status,
             error=error,
             forced_failure_reason=latency_failure_reason,
+            job_type=job_type,
+            miner_hotkey=miner_hotkey,
+            latency_ms=latencies.get("total_runtime_ms"),
         )
 
         await self._notify_sync_waiter(
@@ -481,6 +517,9 @@ class CallbackService:
         status: str,
         error: Optional[str],
         forced_failure_reason: Optional[str] = None,
+        job_type: Optional[str] = None,
+        miner_hotkey: Optional[str] = None,
+        latency_ms: Optional[int] = None,
     ) -> str:
         normalized_status = status.strip().lower()
         failure_reason = forced_failure_reason
@@ -491,14 +530,51 @@ class CallbackService:
 
         if failure_reason is not None:
             logger.warning(
-                "callback.finalize_status_failure job_id=%s status=%s error=%s failure_reason=%s",
-                job_uuid,
-                status,
-                error,
-                failure_reason,
+                "job.failed",
+                extra={
+                    "job_id": str(job_uuid),
+                    "job_type": job_type,
+                    "miner_hotkey": miner_hotkey,
+                    "failure_reason": failure_reason,
+                    "error": error,
+                    "event": "job.failed",
+                },
             )
             await job_service.mark_job_failure(job_uuid, failure_reason)
+            # Record failed job metric
+            record_job_failed(
+                job_type=job_type or "unknown",
+                miner_hotkey=miner_hotkey or "unknown",
+                failure_reason=failure_reason,
+            )
+            # Add span attributes for failure
+            _set_span_attributes(
+                job_status="failed",
+                failure_reason=failure_reason,
+            )
             return "error"
+
+        # Log and record successful job completion
+        logger.info(
+            "job.completed",
+            extra={
+                "job_id": str(job_uuid),
+                "job_type": job_type,
+                "miner_hotkey": miner_hotkey,
+                "latency_ms": latency_ms,
+                "event": "job.completed",
+            },
+        )
+        record_job_completed(
+            job_type=job_type or "unknown",
+            miner_hotkey=miner_hotkey or "unknown",
+            latency_ms=float(latency_ms) if latency_ms is not None else None,
+        )
+        # Add span attributes for success
+        _set_span_attributes(
+            job_status="success",
+            latency_ms=latency_ms,
+        )
         return "success"
 
     @staticmethod

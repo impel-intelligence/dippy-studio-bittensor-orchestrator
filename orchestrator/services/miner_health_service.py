@@ -38,11 +38,16 @@ class MinerHealthService:
                 validated_state[key] = value
                 continue
 
+            existing = persisted_state.get(key)
+            existing_failed_audits = getattr(existing, "failed_audits", 0) if existing else 0
+            incoming_failed_audits = getattr(value, "failed_audits", 0)
+            failed_audits = max(existing_failed_audits, incoming_failed_audits)
+
             network_address = value.network_address
             if not network_address or not network_address.strip():
-                existing = persisted_state.get(key)
                 resolved_valid = existing.valid if isinstance(existing, Miner) else False
-                failed_audits = getattr(existing, "failed_audits", 0) if existing else 0
+                if failed_audits > 0:
+                    resolved_valid = False
                 validated_state[key] = Miner(
                     uid=value.uid,
                     network_address=value.network_address,
@@ -76,8 +81,9 @@ class MinerHealthService:
                 elif capacity_parse_error:
                     value.capacity = {}
 
-            existing = persisted_state.get(key)
-            if network_valid:
+            if failed_audits > 0:
+                resolved_valid = False
+            elif network_valid:
                 resolved_valid = True
             elif isinstance(existing, Miner):
                 resolved_valid = existing.valid
@@ -86,7 +92,6 @@ class MinerHealthService:
             if capacity_parse_error:
                 resolved_valid = False
 
-            failed_audits = getattr(existing, "failed_audits", 0) if existing else 0
             validated_state[key] = Miner(
                 uid=value.uid,
                 network_address=value.network_address,
