@@ -291,9 +291,10 @@ def create_public_router() -> APIRouter:
                 miner = metagraph_state.get(hotkey)
                 failed_audits = getattr(miner, "failed_audits", 0) if miner else 0
                 status_value = "SLASHED" if failed_audits else "COMPLETED"
+                total_score = 0.0 if failed_audits else float(record.scores)
                 scores_payload[hotkey] = ScorePayload(
                     status=status_value,
-                    score=ScoreValue(total_score=float(record.scores)),
+                    score=ScoreValue(total_score=total_score),
                 )
 
             # Calculate empty_scores by summing all scores

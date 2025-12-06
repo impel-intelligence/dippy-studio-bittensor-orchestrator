@@ -392,8 +392,16 @@ class JobService:
     def _parse_job_status(value: Any) -> JobStatus:
         if isinstance(value, JobStatus):
             return value
+        text = str(value).strip().lower()
+        # Accept common synonyms from relay payloads.
+        if text in {"completed", "complete", "success", "successful"}:
+            return JobStatus.SUCCESS
+        if text in {"fail", "failed"}:
+            return JobStatus.FAILED
+        if text in {"timeout", "timed_out", "timed-out"}:
+            return JobStatus.TIMEOUT
         try:
-            return JobStatus(str(value))
+            return JobStatus(text)
         except Exception:  # noqa: BLE001
             return JobStatus.PENDING
 

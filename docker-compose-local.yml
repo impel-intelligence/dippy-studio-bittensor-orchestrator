@@ -11,6 +11,9 @@ services:
       - .:/app
       - ${HOME}/.bittensor:/home/appuser/.bittensor:ro
       - ./gcs_service_account.json:/app/gcs_service_account.json:ro
+    networks:
+      - default
+      - signoz-net
     environment:
       - ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-42169}
       - EPISTULA_HOTKEY_PATH=/home/appuser/.bittensor/wallets/coldkey/hotkeys/hotkey
@@ -74,6 +77,9 @@ services:
     volumes:
       - jobrelay_data:/var/lib/jobrelay
       - ./gcs_service_account.json:/app/gcs_service_account.json:ro
+    networks:
+      - default
+      - signoz-net
     environment:
       - JOBRELAY_AUTH_TOKEN=${JOBRELAY_AUTH_TOKEN:-my-secret-key-here}
       - JOBRELAY_GCS_BUCKET=${JOBRELAY_GCS_BUCKET:-subnet11_internal}
@@ -159,6 +165,9 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
+    networks:
+      - default
+      - signoz-net
 
   postgres:
     image: postgres:18
@@ -180,3 +189,7 @@ services:
 volumes:
   jobrelay_data:
   postgres_data:
+
+networks:
+  signoz-net:
+    external: true

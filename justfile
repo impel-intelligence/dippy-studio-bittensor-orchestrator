@@ -199,6 +199,20 @@ run-workers env='local' hotkey='':
 	docker compose --file "$COMPOSE_FILE" exec "$SERVICE" \
 		python -m orchestrator.workers all $HOTKEY_FLAG
 
+# Replay latest audit job to all miners for matching job types
+run-seed-requests env='local':
+	ENV_RAW="{{env}}"; \
+	if [ "${ENV_RAW#env=}" != "${ENV_RAW}" ]; then ENV_VALUE="${ENV_RAW#env=}"; else ENV_VALUE="${ENV_RAW}"; fi; \
+	if [ "${ENV_VALUE}" = "prod" ]; then \
+		COMPOSE_FILE="docker-compose-prod.yml"; \
+		SERVICE="orchestrator"; \
+	else \
+		COMPOSE_FILE="docker-compose-local.yml"; \
+		SERVICE="orchestrator-dev"; \
+	fi; \
+	docker compose --file "$COMPOSE_FILE" exec "$SERVICE" \
+		python -m orchestrator.workers seed-requests
+
 # ═══════════════════════════════════════════════════════════════════════════
 # DATABASE MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════

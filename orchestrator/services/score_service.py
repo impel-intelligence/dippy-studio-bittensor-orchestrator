@@ -1236,9 +1236,10 @@ async def build_scores_from_state(
                 logger=logger,
             )
 
+            score_total = 0.0 if failed_audits else float(history.scores)
             payload = ScorePayload(
                 status=status_value,
-                score=ScoreValue(total_score=float(history.scores)),
+                score=ScoreValue(total_score=score_total),
             )
             return hotkey, payload, {
                 "jobs_considered": len(filtered_jobs),

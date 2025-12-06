@@ -9,7 +9,9 @@ from typing import Iterable, Sequence
 from orchestrator.runners.audit import AuditCheckRunner, AuditSeedRunner
 from orchestrator.runners.metagraph import MetagraphStateRunner
 from orchestrator.runners.score_etl import ScoreETLRunner
-from orchestrator.server import Orchestrator
+from orchestrator.runners.seed_requests import SeedRequestsRunner
+from orchestrator.services.listen_service import ListenService
+from orchestrator.server import Orchestrator, _configure_opentelemetry
 
 RunnerTarget = str
 WORKER_LOGGER = logging.getLogger("orchestrator.workers")
@@ -165,6 +167,48 @@ async def _run_audit_check(orchestrator: Orchestrator, *, apply_changes: bool = 
     )
 
 
+async def _run_seed_requests(orchestrator: Orchestrator) -> None:
+    WORKER_LOGGER.info(
+        "worker.seed_requests.start netuid=%s network=%s",
+        orchestrator.config.subnet.netuid,
+        orchestrator.config.subnet.network,
+    )
+
+    listen_service = ListenService(
+        job_service=orchestrator.job_service,
+        metagraph=orchestrator.miner_metagraph_service,
+        logger=orchestrator.server_context.logger,
+        callback_url=orchestrator.config.callback.resolved_callback_url(),
+        epistula_client=orchestrator.epistula_client,
+    )
+
+    runner = SeedRequestsRunner(
+        job_service=orchestrator.job_service,
+        miner_metagraph_service=orchestrator.miner_metagraph_service,
+        listen_service=listen_service,
+        netuid=orchestrator.config.subnet.netuid,
+        network=orchestrator.config.subnet.network,
+        logger=orchestrator.server_context.logger,
+    )
+    summary = await runner.execute()
+    if summary is None:
+        WORKER_LOGGER.info(
+            "worker.seed_requests.complete netuid=%s network=%s result=skipped",
+            orchestrator.config.subnet.netuid,
+            orchestrator.config.subnet.network,
+        )
+        return
+
+    WORKER_LOGGER.info(
+        "worker.seed_requests.complete netuid=%s network=%s source_job=%s targets=%s dispatched=%s",
+        orchestrator.config.subnet.netuid,
+        orchestrator.config.subnet.network,
+        summary.source_job_id,
+        summary.target_miners,
+        len(summary.dispatched_job_ids),
+    )
+
+
 async def _run_targets(
     orchestrator: Orchestrator,
     targets: Sequence[RunnerTarget],
@@ -190,6 +234,8 @@ async def _run_targets(
             await _run_audit_check(orchestrator, apply_changes=audit_apply_changes)
         elif normalized == "audit":
             await _run_audit_check(orchestrator, apply_changes=audit_apply_changes)
+        elif normalized == "seed-requests":
+            await _run_seed_requests(orchestrator)
         else:
             raise ValueError(f"Unknown runner target: {target}")
 
@@ -208,9 +254,15 @@ def run_targets(
     if not sequence:
         raise ValueError("At least one runner target must be provided")
 
-    WORKER_LOGGER.info("worker.sequence.start targets=%s", ",".join(sequence))
-
     orchestrator = Orchestrator(config_path=config_path, database_url=database_url)
+
+    # Ensure OTEL logging/tracing is active for CLI workers so logs land in SigNoz with trace context.
+    try:
+        _configure_opentelemetry(orchestrator.app)
+    except Exception:  # noqa: BLE001
+        WORKER_LOGGER.exception("worker.otel_setup_failed")
+
+    WORKER_LOGGER.info("worker.sequence.start targets=%s", ",".join(sequence))
     try:
         asyncio.run(
             _run_targets(

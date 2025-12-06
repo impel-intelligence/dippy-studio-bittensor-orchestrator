@@ -41,6 +41,9 @@ services:
       - .:/app
       - ${HOME}/.bittensor:/home/appuser/.bittensor:ro
       - ${GCS_CREDENTIALS_FILE:-./gcs_service_account.json}:/app/gcs_service_account.json:ro
+    networks:
+      - default
+      - signoz-net
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "signoz-otel-collector:host-gateway"
@@ -97,6 +100,9 @@ services:
       - ${GCS_CREDENTIALS_FILE:-./gcs_service_account.json}:/app/gcs_service_account.json:ro
     extra_hosts:
       - "signoz-otel-collector:host-gateway"
+    networks:
+      - default
+      - signoz-net
 
   redis:
     image: redis:7-alpine
@@ -132,3 +138,7 @@ volumes:
   orchestrator_data:
   jobrelay_data:
   postgres_data:
+
+networks:
+  signoz-net:
+    external: true
