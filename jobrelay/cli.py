@@ -1,21 +1,17 @@
-"""Command-line helpers for inspecting JobRelay DuckDB state."""
+"""Command-line helpers for JobRelay operations."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
-import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-import duckdb
 from dateutil import parser as date_parser
 
 from .config import get_settings
-from .duckdb_manager import JobRelayDuckDBManager
 from .models import JobStatus
+from .postgres_manager import JobRelayPostgresManager
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -123,21 +119,58 @@ def _build_query(args: argparse.Namespace) -> tuple[str, list[Any]]:
 
 def _completed_command(args: argparse.Namespace) -> int:
     settings = get_settings()
-    db_path = settings.resolved_cache_db_path
-    if not Path(db_path).exists():
-        print(f"✗ DuckDB file not found at {db_path}. Start jobrelay at least once to create it.")
+    if not settings.postgres_dsn:
+        print("✗ JOBRELAY_POSTGRES_DSN must be set")
         return 1
+    manager = JobRelayPostgresManager(settings)
 
-    query, params = _build_query(args)
-    snapshot_path = _snapshot_db_file(Path(db_path))
-    try:
-        with duckdb.connect(str(snapshot_path), read_only=True) as conn:
-            cursor = conn.execute(query, params)
-            columns = [desc[0] for desc in cursor.description]
-            rows = cursor.fetchall()
-    finally:
-        snapshot_path.unlink(missing_ok=True)
+    query = """
+        SELECT CAST(job_id AS VARCHAR) AS job_id,
+               job_type,
+               miner_hotkey,
+               status,
+               completed_at,
+               execution_duration_ms,
+               result_image_url,
+               audit_status,
+               verification_status,
+               payload,
+               response_payload
+        FROM inference_jobs
+        WHERE completed_at IS NOT NULL AND status <> 'pending'
+    """
+    clauses = []
+    params: list[Any] = []
+    if args.job_type:
+        clauses.append("job_type = %s")
+        params.append(args.job_type)
+    if args.status:
+        placeholders = ", ".join("%s" for _ in args.status)
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(args.status)
+    if args.hotkey:
+        clauses.append("miner_hotkey = %s")
+        params.append(args.hotkey)
+    if args.since:
+        clauses.append("completed_at >= %s")
+        params.append(args.since)
+    if clauses:
+        query += " AND " + " AND ".join(clauses)
+    query += " ORDER BY completed_at DESC, job_id"
+    if args.limit:
+        query += " LIMIT %s"
+        params.append(args.limit)
+
+    with manager._pool.connection() as conn:  # noqa: SLF001 - reuse pool for CLI
+        cursor = conn.execute(query, params)
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
     records = _rowdicts(columns, rows)
+
+    if not args.show_payload:
+        for row in records:
+            row.pop("payload", None)
+            row.pop("response_payload", None)
 
     if args.output == "json":
         _emit_json(records)
@@ -146,21 +179,31 @@ def _completed_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _snapshot_db_file(source: Path) -> Path:
-    """Copy the live DuckDB to a temporary file so read queries avoid file locks."""
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".duckdb", delete=False)
-    tmp_path = Path(tmp.name)
-    tmp.close()
-    shutil.copy2(source, tmp_path)
-    return tmp_path
+def _flush_command() -> int:
+    settings = get_settings()
+    if not settings.postgres_dsn:
+        print("✗ JOBRELAY_POSTGRES_DSN must be set for flush")
+        return 1
+    manager = JobRelayPostgresManager(settings)
+    gcs_uri = manager.flush()
+    if gcs_uri:
+        print(f"✓ Flushed jobs to {gcs_uri}")
+    else:
+        print("✓ No jobs needed flushing")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Inspect local JobRelay DuckDB state for completed jobs.",
+        description="JobRelay utilities (Postgres-backed).",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    flush_parser = subparsers.add_parser(
+        "flush",
+        help="Flush completed/failed jobs from Postgres to object storage and delete them.",
+    )
+    flush_parser.set_defaults(func=lambda _args: _flush_command())
 
     completed_parser = subparsers.add_parser(
         "completed",
@@ -205,49 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     completed_parser.set_defaults(func=_completed_command)
 
-    restore_parser = subparsers.add_parser(
-        "restore-snapshots",
-        help="Load all GCS snapshots into the local DuckDB (read-only against GCS).",
-    )
-    restore_parser.add_argument(
-        "--max-snapshots",
-        type=int,
-        default=None,
-        help="Limit how many latest snapshots to restore (default: all).",
-    )
-    restore_parser.add_argument(
-        "--keep-existing",
-        action="store_true",
-        help="Merge with existing DuckDB rows instead of replacing (default: replace).",
-    )
-    restore_parser.set_defaults(func=_restore_snapshots_command)
     return parser
-
-
-def _restore_snapshots_command(args: argparse.Namespace) -> int:
-    settings = get_settings()
-    manager = JobRelayDuckDBManager(settings)
-    try:
-        result = manager.restore_all_snapshots(
-            replace=not args.keep_existing,
-            max_snapshots=args.max_snapshots,
-        )
-    finally:
-        manager.close()
-
-    print(
-        json.dumps(
-            {
-                "snapshots_processed": result.get("snapshots_processed", 0),
-                "restored_rows": result.get("restored_rows", 0),
-                "deduped_rows": result.get("deduped_rows", 0),
-                "replaced_existing": not args.keep_existing,
-            },
-            default=_json_default,
-            indent=2,
-        )
-    )
-    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

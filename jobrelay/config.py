@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     cache_db_path: Optional[Path] = Field(default=None)
     cache_max_size_gb: int = Field(default=50, ge=1)
 
+    postgres_dsn: Optional[str] = Field(default=None)
+    postgres_min_connections: int = Field(default=1, ge=1)
+    postgres_max_connections: int = Field(default=10, ge=1)
+
     sync_interval_seconds: int = Field(default=3600, ge=60)
     partition_strategy: str = Field(default="hourly")
     row_group_size: int = Field(default=100_000, ge=1)

@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 
 from .background import BackgroundJobProcessor
 from .config import Settings, get_settings
-from .duckdb_manager import JobRelayDuckDBManager
+from .postgres_manager import JobRelayPostgresManager
 from .models import InferenceJob, InferenceJobCreate, InferenceJobUpdate
 from .repository import InferenceJobRepository
 
@@ -139,9 +139,12 @@ def _configure_opentelemetry(app: FastAPI) -> None:
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    manager = JobRelayDuckDBManager(settings)
-    repository = InferenceJobRepository(manager)
-    processor = BackgroundJobProcessor(repository, settings, manager)
+    if not settings.postgres_dsn:
+        raise RuntimeError("JOBRELAY_POSTGRES_DSN must be configured; DuckDB fallback is disabled")
+    LOGGER.info("Using Postgres backend for jobrelay storage")
+    primary_manager = JobRelayPostgresManager(settings)
+    repository = InferenceJobRepository(primary_manager)
+    processor = BackgroundJobProcessor(repository, settings, primary_manager)
 
     app = FastAPI(title="Job Relay Service", version="0.1.0")
     _configure_opentelemetry(app)

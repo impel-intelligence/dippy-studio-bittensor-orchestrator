@@ -14,3 +14,4 @@ opentelemetry-exporter-otlp-proto-http
 opentelemetry-instrumentation-fastapi
 opentelemetry-instrumentation-requests
 opentelemetry-instrumentation-logging
+psycopg[binary,pool]>=3.1

@@ -72,9 +72,11 @@ services:
     build:
       context: .
       dockerfile: jobrelay.Dockerfile
+    command: uvicorn jobrelay.app:app --host 0.0.0.0 --port 8181 --reload --reload-dir jobrelay
     ports:
       - "8181:8181"
     volumes:
+      - .:/app
       - jobrelay_data:/var/lib/jobrelay
       - ./gcs_service_account.json:/app/gcs_service_account.json:ro
     networks:
@@ -84,6 +86,7 @@ services:
       - JOBRELAY_AUTH_TOKEN=${JOBRELAY_AUTH_TOKEN:-my-secret-key-here}
       - JOBRELAY_GCS_BUCKET=${JOBRELAY_GCS_BUCKET:-subnet11_internal}
       - JOBRELAY_GCP_CREDENTIALS_PATH=${JOBRELAY_GCP_CREDENTIALS_PATH:-/app/gcs_service_account.json}
+      - JOBRELAY_POSTGRES_DSN=${JOBRELAY_POSTGRES_DSN:-postgresql://orchestrator:orchestrator@postgres:5432/orchestrator}
       - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcs_service_account.json}
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://signoz-otel-collector:4318
       - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
@@ -91,6 +94,28 @@ services:
       - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=local,provider_name=bittensor
     env_file:
       - .env
+
+  ss58:
+    build:
+      context: ./ss58_service
+      dockerfile: Dockerfile
+    command: python -m ss58.main
+    ports:
+      - "${SS58_PORT:-8585}:${SS58_PORT:-8585}"
+    volumes:
+      - ./ss58_service:/app
+      - ss58_data:/var/lib/ss58
+    networks:
+      - default
+      - signoz-net
+    environment:
+      - SS58_HOST=0.0.0.0
+      - SS58_PORT=${SS58_PORT:-8585}
+      - SS58_RELOAD=true
+      - SS58_PINATA_JWT=${SS58_PINATA_JWT}
+      - SS58_ED25519_SEED_HEX=${SS58_ED25519_SEED_HEX}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   python-runner:
     build:
@@ -189,6 +214,7 @@ services:
 volumes:
   jobrelay_data:
   postgres_data:
+  ss58_data:
 
 networks:
   signoz-net:

@@ -34,6 +34,7 @@ class JobRelayDuckDBManager:
         "job_id",
         "job_type",
         "miner_hotkey",
+        "source",
         "payload",
         "result_image_url",
         "creation_timestamp",
@@ -54,6 +55,7 @@ class JobRelayDuckDBManager:
         "response_timestamp",
         "callback_secret",
         "prompt_seed",
+        "source",
     ]
     _SNAPSHOT_METADATA_COLUMNS = ["snapshot_epoch"]
 
@@ -84,6 +86,7 @@ class JobRelayDuckDBManager:
                 job_id UUID PRIMARY KEY,
                 job_type TEXT NOT NULL,
                 miner_hotkey TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
                 payload JSON NOT NULL,
                 result_image_url TEXT,
                 creation_timestamp TIMESTAMPTZ NOT NULL,
@@ -145,6 +148,7 @@ class JobRelayDuckDBManager:
             "response_timestamp": "TIMESTAMPTZ",
             "callback_secret": "TEXT",
             "prompt_seed": "BIGINT",
+            "source": "TEXT",
         }
         existing = {
             row[1]
@@ -190,6 +194,7 @@ class JobRelayDuckDBManager:
             "job_id",
             "job_type",
             "miner_hotkey",
+            "source",
             "payload",
             "result_image_url",
             "creation_timestamp",
@@ -205,11 +210,15 @@ class JobRelayDuckDBManager:
             "audit_target_job_id",
         ]
         allowed_columns = set(columns_order)
-        missing_columns = allowed_columns - set(df.columns)
-        if missing_columns:
+        optional_columns = {"source"}
+        missing_required = allowed_columns - set(df.columns) - optional_columns
+        if missing_required:
             raise RuntimeError(
-                f"Snapshot {blob.name} is missing required columns: {sorted(missing_columns)}"
+                f"Snapshot {blob.name} is missing required columns: {sorted(missing_required)}"
             )
+        for optional in optional_columns:
+            if optional not in df.columns:
+                df[optional] = ""
         df = df[columns_order]
         df["job_id"] = df["job_id"].astype(str)
         if "audit_target_job_id" in df.columns:
@@ -243,7 +252,7 @@ class JobRelayDuckDBManager:
         self._write_conn.execute(
             """
             INSERT INTO inference_jobs (
-                job_id, job_type, miner_hotkey, payload,
+                job_id, job_type, miner_hotkey, source, payload,
                 result_image_url, creation_timestamp, last_updated_at,
                 miner_received_at, completed_at, execution_duration_ms,
                 expires_at, status, audit_status, verification_status,
@@ -252,13 +261,14 @@ class JobRelayDuckDBManager:
                 response_payload, response_timestamp,
                 callback_secret, prompt_seed
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             [
                 parameters["job_id"],
                 parameters["job_type"],
                 parameters["miner_hotkey"],
+                parameters.get("source", ""),
                 parameters["payload"],
                 parameters.get("result_image_url"),
                 parameters["creation_timestamp"],
@@ -304,6 +314,7 @@ class JobRelayDuckDBManager:
             cursor.execute(
                 """
                 SELECT job_id, job_type, miner_hotkey, payload,
+                       source,
                        result_image_url, creation_timestamp, last_updated_at,
                        miner_received_at, completed_at, execution_duration_ms,
                        expires_at, status, audit_status, verification_status,
@@ -330,6 +341,7 @@ class JobRelayDuckDBManager:
         with self._read_cursor() as cursor:
             query = """
                 SELECT job_id, job_type, miner_hotkey, payload,
+                       source,
                        result_image_url, creation_timestamp, last_updated_at,
                        miner_received_at, completed_at, execution_duration_ms,
                        expires_at, status, audit_status, verification_status,
@@ -377,6 +389,7 @@ class JobRelayDuckDBManager:
             cursor.execute(
                 f"""
                 SELECT job_id, job_type, miner_hotkey, payload,
+                       source,
                        result_image_url, creation_timestamp, last_updated_at,
                        miner_received_at, completed_at, execution_duration_ms,
                        expires_at, status, audit_status, verification_status,

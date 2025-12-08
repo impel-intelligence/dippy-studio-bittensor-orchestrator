@@ -66,6 +66,7 @@ class _DateTimeModel(BaseModel):
 class InferenceJobCreate(_DateTimeModel):
     job_type: str
     miner_hotkey: str
+    source: str = Field(default="")
     payload: Dict[str, Any]
 
     result_image_url: Optional[str] = None
@@ -99,6 +100,7 @@ class InferenceJob(InferenceJobCreate):
 class InferenceJobUpdate(_DateTimeModel):
     job_type: Optional[str] = None
     miner_hotkey: Optional[str] = None
+    source: Optional[str] = None
     payload: Optional[Dict[str, Any]] = None
     result_image_url: Optional[str] = None
 

@@ -12,7 +12,6 @@ from typing import Dict, Optional, List
 from uuid import UUID
 
 from .config import Settings
-from .duckdb_manager import JobRelayDuckDBManager
 from .repository import InferenceJobRepository
 
 
@@ -53,7 +52,7 @@ class BackgroundJobProcessor:
         self,
         repository: InferenceJobRepository,
         settings: Settings,
-        manager: JobRelayDuckDBManager,
+        manager,
     ):
         self._repository = repository
         self._settings = settings
@@ -71,11 +70,12 @@ class BackgroundJobProcessor:
         self._periodic_tasks.append(
             asyncio.create_task(self._cleanup_loop(), name="jobrelay-cleanup")
         )
-        if not self._settings.gcs_bucket:
-            raise ValueError("JOBRELAY_GCS_BUCKET must be configured for snapshot management")
-        self._periodic_tasks.append(
-            asyncio.create_task(self._snapshot_loop(), name="jobrelay-snapshot")
-        )
+        if getattr(self._manager, "supports_snapshot_loop", True):
+            if not self._settings.gcs_bucket:
+                raise ValueError("JOBRELAY_GCS_BUCKET must be configured for snapshot management")
+            self._periodic_tasks.append(
+                asyncio.create_task(self._snapshot_loop(), name="jobrelay-snapshot")
+            )
 
     async def stop(self) -> None:
         self._stop_event.set()

@@ -59,6 +59,22 @@ stub-restart:
 	docker compose --file docker-compose-local.yml restart stub-miner
 	@echo "🔁 Restarted stub-miner"
 
+ss58-logs tail='100':
+	docker compose --file docker-compose-local.yml logs --tail={{tail}} -f ss58
+
+ss58-shell:
+	docker compose --file docker-compose-local.yml exec ss58 bash
+
+ss58-python script:
+	docker compose --file docker-compose-local.yml exec ss58 python {{script}}
+
+ss58-verify head='' public_key='' gateway='https://gateway.pinata.cloud/ipfs':
+	@if [ -z "{{head}}" ] || [ -z "{{public_key}}" ]; then \
+		echo "Usage: just ss58-verify head=<cid> public_key=<hex> [gateway=...]"; exit 1; \
+	fi; \
+	PYTHONPATH=ss58_service uv run --with-requirements ss58_service/ss58/requirements.ss58.txt \
+		python -m ss58.verify_chain --head "{{head}}" --public-key-hex "{{public_key}}" --gateway "{{gateway}}"
+
 # Drop into python-runner shell for ad-hoc scripts
 python-shell:
 	docker compose --file docker-compose-local.yml exec python-runner bash
@@ -311,6 +327,10 @@ check: check-env check-docker
 jobrelay-cli args="--help":
 	docker compose --file docker-compose-local.yml run --rm jobrelay \
 		python -m jobrelay.cli {{args}}
+
+jobrelay-flush:
+	docker compose --file docker-compose-local.yml run --rm jobrelay \
+		python -m jobrelay.cli flush
 
 # Restore JobRelay state from GCS snapshots into the local DuckDB
 jobrelay-restore max_snapshots='' keep_existing='false':
