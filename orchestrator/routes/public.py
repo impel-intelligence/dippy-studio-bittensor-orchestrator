@@ -70,7 +70,7 @@ class DebugListenRequest(ListenRequest):
     miner: Miner | None = None
 
 
-DEBUG_CALLBACK_BASE = "https://orchestrator.dippy-bittensor-subnet.com"
+DEBUG_CALLBACK_BASE = "https://orchestrator.dippy-bittensor.studio"
 
 
 class ListenResponse(BaseModel):

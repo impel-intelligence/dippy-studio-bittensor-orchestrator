@@ -213,6 +213,16 @@ class ScoreRepository:
             data = json.loads(payload)
         else:
             data = payload
+        data = dump_model(data)
+        if "scores" not in data:
+            try:
+                fallback_score = float(data.get("ema_score", 0.0))
+            except (TypeError, ValueError):
+                fallback_score = 0.0
+            logger.debug("score_repository.payload_missing_scores defaulted")
+            data = {**data, "scores": fallback_score}
+        if "failure_count" not in data:
+            data = {**data, "failure_count": 0}
         record = validate_model(ScoreRecord, data)
         self._register_record_update(record)
         return record
