@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 from uuid import UUID
 
+from orchestrator.clients.ss58_client import SS58Client
 from orchestrator.common.job_store import JobStatus, JobType
 from orchestrator.common.payload_templates import build_img_h100_pcie_payload
 from orchestrator.common.structured_logging import StructuredLogger
@@ -50,6 +51,7 @@ class AuditBroadcastRunner(InstrumentedRunner[AuditBroadcastSummary]):
         audit_miner: Miner,
         netuid: int,
         network: str,
+        ss58_client: SS58Client | None = None,
         logger: StructuredLogger | logging.Logger | None = None,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         dispatch_concurrency: int = _DEFAULT_DISPATCH_CONCURRENCY,
@@ -62,6 +64,7 @@ class AuditBroadcastRunner(InstrumentedRunner[AuditBroadcastSummary]):
         self._audit_miner = audit_miner
         self._netuid = netuid
         self._network = network
+        self._ss58_client = ss58_client
         self._timeout_seconds = max(1.0, float(timeout_seconds))
         self._dispatch_concurrency = max(1, int(dispatch_concurrency))
 
@@ -216,25 +219,25 @@ class AuditBroadcastRunner(InstrumentedRunner[AuditBroadcastSummary]):
                     hotkey=hotkey,
                     error=str(exc),
                 )
-                self._slash_and_zero(hotkey)
+                await self._slash_and_zero(hotkey)
                 failures += 1
                 continue
 
             if job.status != JobStatus.SUCCESS:
-                self._slash_and_zero(hotkey)
+                await self._slash_and_zero(hotkey)
                 failures += 1
                 continue
 
             miner_hash = self._extract_image_hash(job)
             if not miner_hash or not audit_hash or miner_hash != audit_hash:
                 mismatches += 1
-                self._slash_and_zero(hotkey)
+                await self._slash_and_zero(hotkey)
             else:
                 completed += 1
 
         return completed, failures, mismatches
 
-    def _slash_and_zero(self, hotkey: str) -> None:
+    async def _slash_and_zero(self, hotkey: str) -> None:
         miner = self._miner_metagraph_service.get_miner(hotkey)
         if miner is not None:
             failed_audits = getattr(miner, "failed_audits", 0) or 0
@@ -255,6 +258,17 @@ class AuditBroadcastRunner(InstrumentedRunner[AuditBroadcastSummary]):
             self._score_service.put(hotkey, ScoreRecord(scores=0.0, failure_count=failure_count))
         except Exception as exc:  # pragma: no cover - defensive guard
             self._logger.debug("audit_broadcast.score_update_failed", hotkey=hotkey, error=str(exc))
+        await self._record_ban(hotkey)
+
+    async def _record_ban(self, hotkey: str) -> None:
+        client = getattr(self, "_ss58_client", None)
+        candidate = (hotkey or "").strip()
+        if client is None or not candidate:
+            return
+        try:
+            await client.append_addresses([candidate])
+        except Exception as exc:  # pragma: no cover - defensive guard
+            self._logger.debug("audit_broadcast.ss58_append_failed", hotkey=candidate, error=str(exc))
 
     @staticmethod
     def _extract_image_hash(job: Any) -> Optional[str]:

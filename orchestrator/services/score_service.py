@@ -19,6 +19,7 @@ except ImportError:
 
 from orchestrator.clients.database import PostgresClient
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient
+from orchestrator.clients.ss58_client import SS58Client
 from orchestrator.common.datetime import ensure_aware, parse_datetime
 from orchestrator.common.model_utils import dump_model, validate_model
 from orchestrator.domain.miner import Miner
@@ -267,6 +268,7 @@ class ScoreEngine:
         netuid: int | None = None,
         network: str | None = None,
         fetch_concurrency: int = 8,
+        ss58_client: SS58Client | None = None,
         score_settings: "ScoreSettings | None" = None,
         score_fn: Callable[[Mapping[str, Any]], float] = job_to_weighted_score,
         job_filter: Callable[[Mapping[str, Any]], bool] | None = None,
@@ -278,6 +280,7 @@ class ScoreEngine:
         self._miner_metagraph_service = miner_metagraph_service
         self._netuid = netuid
         self._network = network
+        self._ss58_client = ss58_client
         self._fetch_concurrency = max(1, int(fetch_concurrency)) if fetch_concurrency else 1
         self._score_settings = (score_settings or ScoreSettings()).normalized()
         self._score_fn = score_fn
@@ -446,6 +449,7 @@ class ScoreEngine:
 
     async def run_once(self, *, trace_hotkeys: Iterable[str] | None = None) -> "ScoreRunSummary | None":
         trace_targets = self._normalize_hotkeys(trace_hotkeys or [])
+        trace_target_set = set(trace_targets)
         trace_details: Dict[str, Dict[str, Any]] = {}
         if trace_targets:
             logger.info(
@@ -453,6 +457,7 @@ class ScoreEngine:
                 ",".join(trace_targets),
             )
 
+        banned_hotkeys = await self._fetch_banned_hotkeys()
         invalid_hotkeys: set[str] = set()
         if self._miner_metagraph_service is not None:
             try:
@@ -476,7 +481,7 @@ class ScoreEngine:
         if trace_targets:
             normalized_hotkeys = self._normalize_hotkeys(normalized_hotkeys + trace_targets)
 
-        if not normalized_hotkeys and not invalid_hotkeys:
+        if not normalized_hotkeys and not invalid_hotkeys and not banned_hotkeys:
             logger.info("score_engine.run.skipped reason=%s", "no_hotkeys")
             return None
 
@@ -488,18 +493,19 @@ class ScoreEngine:
             max(0, len(normalized_hotkeys) - len(preview)),
         )
 
+        hotkeys_for_fetch = [hotkey for hotkey in normalized_hotkeys if hotkey not in banned_hotkeys]
         window_reference = datetime.now(timezone.utc)
         completed_jobs: Dict[str, list[Mapping[str, Any]]] = {}
         fetch_failures: set[str] = set()
 
-        if normalized_hotkeys:
+        if hotkeys_for_fetch:
             completed_jobs, fetch_failures = await self.fetch_completed_jobs(
-                normalized_hotkeys,
+                hotkeys_for_fetch,
                 lookback_days=self._lookback_days,
                 reference_time=window_reference,
             )
-            for hotkey in normalized_hotkeys:
-                completed_jobs.setdefault(hotkey, [])
+        for hotkey in normalized_hotkeys:
+            completed_jobs.setdefault(hotkey, [])
 
         jobs_considered = sum(len(jobs) for jobs in completed_jobs.values())
 
@@ -528,6 +534,12 @@ class ScoreEngine:
 
         stored_scores = self._repository.all()
         existing = {hotkey: stored_scores[hotkey] for hotkey in normalized_hotkeys if hotkey in stored_scores}
+        zero_hotkeys: set[str] = set(invalid_hotkeys)
+        if banned_hotkeys:
+            relevant_banned = banned_hotkeys.intersection(
+                set(normalized_hotkeys) | set(stored_scores.keys()) | trace_target_set
+            )
+            zero_hotkeys.update(relevant_banned)
 
         reference_now = datetime.now(timezone.utc)
 
@@ -579,8 +591,8 @@ class ScoreEngine:
                     record_score,
                 )
 
-        if invalid_hotkeys:
-            for hotkey in invalid_hotkeys:
+        if zero_hotkeys:
+            for hotkey in zero_hotkeys:
                 failure_count = 0
                 existing_record = stored_scores.get(hotkey)
                 if existing_record is not None:
@@ -598,13 +610,13 @@ class ScoreEngine:
                             "job_statuses": [],
                             "fetch_failed": False,
                         },
-                    )["score"] = 0.0
+                    ).update({"score": 0.0, "banned": hotkey in banned_hotkeys})
 
         zeroed_hotkeys = sum(1 for record in score_records.values() if float(record.scores) <= 0.0)
 
         persisted = self.update_scores(score_records)
 
-        hotkeys_considered = len(set(normalized_hotkeys).union(invalid_hotkeys))
+        hotkeys_considered = len(set(normalized_hotkeys).union(zero_hotkeys))
         summary = ScoreRunSummary(
             timestamp=reference_now,
             hotkeys_considered=hotkeys_considered,
@@ -693,6 +705,17 @@ class ScoreEngine:
 
         return await self._derive_hotkeys_from_subnet()
 
+    async def _fetch_banned_hotkeys(self) -> set[str]:
+        client = getattr(self, "_ss58_client", None)
+        if client is None:
+            return set()
+        try:
+            banned = await client.list_addresses()
+            return set(banned)
+        except Exception as exc:  # pragma: no cover - defensive network guard
+            logger.debug("score_engine.banned_fetch_failed", exc_info=exc)
+            return set()
+
     async def _derive_hotkeys_from_subnet(self) -> list[str]:
         if (
             self._subnet_state_service is None
@@ -737,6 +760,7 @@ class ScoreService:
         netuid: int | None = None,
         network: str | None = None,
         fetch_concurrency: int = 8,
+        ss58_client: SS58Client | None = None,
         ema_alpha: float = 0.3,
         ema_half_life_seconds: float = 604_800.0,
         failure_penalty_weight: float = 0.7,
@@ -751,6 +775,7 @@ class ScoreService:
         ).normalized()
 
         self._repository = ScoreRepository(database_service)
+        self._ss58_client = ss58_client
         self._lookback_days: float | None
         if lookback_days is None:
             self._lookback_days = None
@@ -768,6 +793,7 @@ class ScoreService:
             netuid=netuid,
             network=network,
             fetch_concurrency=fetch_concurrency,
+            ss58_client=ss58_client,
             score_settings=settings,
             score_fn=score_fn,
             job_filter=job_filter,
@@ -1224,6 +1250,7 @@ async def build_scores_from_state(
     state: Dict[str, Miner],
     *,
     job_relay_client: BaseJobRelayClient,
+    banned_hotkeys: set[str] | None = None,
     source: str = "metagraph",
     lookback_window: timedelta | None = None,
     score_fn: Callable[[Mapping[str, Any]], float] = job_to_weighted_score,
@@ -1236,6 +1263,7 @@ async def build_scores_from_state(
     if job_relay_client is None:
         raise ValueError("job_relay_client must be provided for score construction")
 
+    banned_hotkeys = banned_hotkeys or set()
     window = lookback_window or _DEFAULT_LOOKBACK_WINDOW
     reference_now = datetime.now(timezone.utc)
     cutoff = reference_now - window
@@ -1249,11 +1277,26 @@ async def build_scores_from_state(
     ).normalized()
 
     async def _score_hotkey(hotkey: str, miner: Miner) -> tuple[str, ScorePayload, dict[str, Any]]:
+        is_banned = hotkey in banned_hotkeys
         async with semaphore:
             failed_audits = int(getattr(miner, "failed_audits", 0) or 0)
             is_invalid = not bool(getattr(miner, "valid", True))
-            slashed = failed_audits > 0 or is_invalid
+            slashed = is_banned or failed_audits > 0 or is_invalid
             status_value = "SLASHED" if slashed else "COMPLETED"
+            if is_banned:
+                payload = ScorePayload(
+                    status=status_value,
+                    score=ScoreValue(total_score=0.0),
+                )
+                return hotkey, payload, {
+                    "jobs_considered": 0,
+                    "jobs_scored": 0,
+                    "failures": 0,
+                    "fetch_failed": False,
+                    "miner_valid": bool(getattr(miner, "valid", False)),
+                    "failed_audits": failed_audits,
+                    "banned": True,
+                }
             try:
                 jobs = await job_relay_client.list_jobs_for_hotkey(hotkey, since=cutoff)
             except Exception as exc:  # pragma: no cover - defensive network logging

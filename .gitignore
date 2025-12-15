@@ -1,3 +1,6 @@
+dashboard
+jobrelay
+infra
 .venv
 *.egg-info
 .claude

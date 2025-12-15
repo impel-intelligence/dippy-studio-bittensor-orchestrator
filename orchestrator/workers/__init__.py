@@ -145,6 +145,7 @@ async def _run_audit_check(orchestrator: Orchestrator, *, apply_changes: bool = 
         network=orchestrator.config.subnet.network,
         apply_changes=apply_changes,
         audit_failure_repository=orchestrator.audit_failure_repository,
+        ss58_client=orchestrator.ss58_client,
         logger=orchestrator.server_context.logger,
     )
     summary = await runner.execute()
@@ -191,6 +192,7 @@ async def _run_audit_broadcast(orchestrator: Orchestrator) -> None:
         audit_miner=orchestrator.audit_miner,
         netuid=orchestrator.config.subnet.netuid,
         network=orchestrator.config.subnet.network,
+        ss58_client=orchestrator.ss58_client,
         logger=orchestrator.server_context.logger,
     )
     summary = await runner.execute()

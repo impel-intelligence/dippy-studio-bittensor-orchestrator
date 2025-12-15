@@ -124,3 +124,43 @@ async def test_build_scores_from_state_handles_fetch_errors() -> None:
 
     assert response.scores[hotkey].score.total_score == 0.0
     assert response.stats["fetch_failures"] == 1
+
+
+@pytest.mark.asyncio
+async def test_build_scores_from_state_slashes_banned_hotkeys() -> None:
+    now = datetime.now(timezone.utc)
+    hotkey = "hk-banned-state"
+    miner = Miner(
+        uid=3,
+        network_address="https://miner3.example.com",
+        valid=True,
+        alpha_stake=500,
+        hotkey=hotkey,
+    )
+
+    jobs_by_hotkey = {
+        hotkey: [
+            {
+                "job_id": "job-banned",
+                "job_type": JobType.FLUX_KONTEXT.value,
+                "status": "success",
+                "completed_at": (now - timedelta(hours=1)).isoformat(),
+                "execution_duration_ms": 500,
+            }
+        ]
+    }
+
+    relay = StubJobRelay(jobs_by_hotkey)
+    state = {hotkey: miner}
+
+    response = await build_scores_from_state(
+        state,
+        job_relay_client=relay,
+        banned_hotkeys={hotkey},
+    )
+
+    payload = response.scores[hotkey]
+    assert payload.status == "SLASHED"
+    assert payload.score.total_score == 0.0
+    assert response.stats["jobs_considered"] == 0
+    assert response.stats["fetch_failures"] == 0

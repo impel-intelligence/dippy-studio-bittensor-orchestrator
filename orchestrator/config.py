@@ -97,12 +97,28 @@ class ListenConfig:
 @dataclass
 class JobRelayConfig:
     enabled: bool = True
-    base_url: Optional[str] = "http://localhost:8181"
+    base_url: Optional[str] = "https://jobrelay1738.dippy-bittensor.studio"
     auth_token: Optional[str] = None
     timeout_seconds: float = 5.0
 
     def is_enabled(self) -> bool:
         return self.enabled and bool(self.base_url)
+
+
+@dataclass
+class SS58Config:
+    base_url: Optional[str] = "http://ss58:8585"
+    timeout_seconds: float = 5.0
+
+    def normalized(self) -> "SS58Config":
+        base = (self.base_url or "").strip()
+        timeout = _maybe_float(self.timeout_seconds, 5.0) or 5.0
+        if timeout <= 0.0:
+            timeout = 5.0
+        return SS58Config(
+            base_url=base or None,
+            timeout_seconds=timeout,
+        )
 
 
 @dataclass
@@ -172,6 +188,7 @@ class OrchestratorConfig:
     callback: CallbackConfig = field(default_factory=CallbackConfig)
     listen: ListenConfig = field(default_factory=ListenConfig)
     jobrelay: JobRelayConfig = field(default_factory=JobRelayConfig)
+    ss58: SS58Config = field(default_factory=SS58Config)
     scores: ScoreConfig = field(default_factory=ScoreConfig)
     audit_seed: AuditSeedConfig = field(default_factory=AuditSeedConfig)
     audit_sample_size: float = 0.1
@@ -277,6 +294,17 @@ class OrchestratorConfig:
             timeout_seconds=jobrelay_timeout,
         )
 
+        ss58_defaults = SS58Config().normalized()
+        ss58_data = data.get("ss58", {}) or {}
+        ss58_base_url = ss58_data.get("base_url", ss58_defaults.base_url)
+        ss58_timeout = _maybe_float(ss58_data.get("timeout_seconds"), ss58_defaults.timeout_seconds)
+        if ss58_timeout is None or ss58_timeout <= 0.0:
+            ss58_timeout = ss58_defaults.timeout_seconds
+        ss58 = SS58Config(
+            base_url=ss58_base_url or ss58_defaults.base_url,
+            timeout_seconds=ss58_timeout,
+        ).normalized()
+
         scores_data = data.get("scores", {}) or {}
         ema_alpha_value = _maybe_float(scores_data.get("ema_alpha"), 1.0)
         if ema_alpha_value is None:
@@ -329,6 +357,7 @@ class OrchestratorConfig:
             callback=callback,
             listen=listen,
             jobrelay=jobrelay,
+            ss58=ss58,
             scores=scores,
             audit_seed=AuditSeedConfig(
                 redis_url=audit_seed_redis_url or listen.sync.redis_url,
@@ -477,9 +506,18 @@ class OrchestratorConfig:
             if lookback_override is not None:
                 self.scores.lookback_days = lookback_override
 
+        if "SS58_BASE_URL" in env:
+            base_url = env["SS58_BASE_URL"].strip()
+            self.ss58.base_url = base_url or self.ss58.base_url
+        if "SS58_TIMEOUT_SECONDS" in env:
+            timeout = _maybe_float(env["SS58_TIMEOUT_SECONDS"], self.ss58.timeout_seconds)
+            if timeout is not None and timeout > 0.0:
+                self.ss58.timeout_seconds = timeout
+
         self.scores = self.scores.normalized()
         self.listen.sync = self.listen.sync.normalized()
         self.audit_seed = self.audit_seed.normalized(default_redis_url=self.listen.sync.redis_url)
+        self.ss58 = self.ss58.normalized()
 
 
 def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None = None) -> OrchestratorConfig:
@@ -533,6 +571,7 @@ __all__ = [
     "ListenConfig",
     "ListenSyncConfig",
     "JobRelayConfig",
+    "SS58Config",
     "ScoreConfig",
     "AuditSeedConfig",
     "load_config",

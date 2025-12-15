@@ -252,8 +252,8 @@ class JobService:
         if limit is not None and limit <= 0:
             raise JobQueryError("Parameter 'limit' must be a positive integer")
 
-        fetch_limit = max(max_results * 3, max_results)
-        records = await self._list_jobs(limit=fetch_limit)
+        fetch_limit = max(limit * 3, limit) if limit else 0
+        records = await self._list_jobs(limit=fetch_limit if fetch_limit > 0 else None)
         jobs: List[Job] = []
         allowed_statuses = {status for status in statuses} if statuses else None
         for record in records:
@@ -279,8 +279,6 @@ class JobService:
         if max_results <= 0:
             raise JobQueryError("Parameter 'max_results' must be a positive integer")
 
-        fetch_limit = max(max_results * 3, max_results)
-        records = await self._list_jobs(limit=fetch_limit)
         cutoff_dt: datetime | None = None
         if lookback_days is not None:
             try:
@@ -289,6 +287,9 @@ class JobService:
                 normalized_days = 0.0
             if normalized_days > 0.0:
                 cutoff_dt = datetime.now(timezone.utc) - timedelta(days=normalized_days)
+
+        fetch_limit = max(max_results * 3, max_results)
+        records = await self._list_jobs(limit=fetch_limit, start=cutoff_dt)
 
         completed_items: list[tuple[datetime, Job]] = []
         completed_states = _TERMINAL_JOB_STATUSES
@@ -382,11 +383,21 @@ class JobService:
             raise JobNotFound(f"Job {job_id} not found")
         return record
 
-    async def _list_jobs(self, *, limit: int | None = None) -> list[Dict[str, Any]]:
+    async def _list_jobs(
+        self,
+        *,
+        limit: int | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        source: str | None = None,
+    ) -> list[Dict[str, Any]]:
         try:
-            if limit is not None and limit > 0 and hasattr(self.job_relay, "list_recent_jobs"):
-                return await self.job_relay.list_recent_jobs(limit=limit)  # type: ignore[arg-type]
-            return await self.job_relay.list_jobs(limit=limit)
+            return await self.job_relay.list_jobs(
+                start=start,
+                end=end,
+                source=source,
+                limit=limit,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("jobrelay.list_failed")
             raise JobRelayError("Failed to list jobs from relay") from exc

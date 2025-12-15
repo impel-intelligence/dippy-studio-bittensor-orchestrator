@@ -22,7 +22,7 @@ audit_seed:
 
 callback:
   uploader: noop
-  url: http://localhost:42169/results/callback
+  url: http://localhost:42069/results/callback
   gcs:
     bucket: null
     prefix: callbacks
@@ -30,8 +30,12 @@ callback:
 
 jobrelay:
   enabled: true
-  base_url: http://localhost:8181
+  base_url: https://jobrelay.url
   auth_token: null
+  timeout_seconds: 5.0
+
+ss58:
+  base_url: http://ss58:8585
   timeout_seconds: 5.0
 
 scores:

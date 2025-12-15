@@ -582,6 +582,21 @@ class _StubJobService:
         self.job_relay = _StubJobRelay(payloads)
 
 
+class _StubSS58Client:
+    def __init__(self, addresses: set[str] | None = None) -> None:
+        self.addresses = set(addresses or set())
+        self.append_calls: list[list[str]] = []
+
+    async def list_addresses(self) -> set[str]:
+        return set(self.addresses)
+
+    async def append_addresses(self, addresses: list[str]) -> bool:
+        cleaned = list(addresses)
+        self.append_calls.append(cleaned)
+        self.addresses.update(cleaned)
+        return True
+
+
 def test_score_etl_zeroes_invalid_miners(database_service: PostgresClient) -> None:
     metagraph = MinerMetagraphService(database_service)
     hotkey_valid = "hk-valid-score"
@@ -641,5 +656,79 @@ def test_score_etl_zeroes_invalid_miners(database_service: PostgresClient) -> No
 
     assert invalid_record is not None
     assert invalid_record.scores == pytest.approx(0.0)
+    assert valid_record is not None
+    assert valid_record.scores > 0.0
+
+
+def test_score_etl_zeroes_banned_hotkeys(database_service: PostgresClient) -> None:
+    metagraph = MinerMetagraphService(database_service)
+    hotkey_banned = "hk-banned-score"
+    hotkey_valid = "hk-allowed-score"
+
+    metagraph.update_state(
+        {
+            hotkey_banned: Miner(
+                uid=200,
+                network_address="https://banned.example",
+                valid=True,
+                alpha_stake=11,
+                capacity={},
+                hotkey=hotkey_banned,
+            ),
+            hotkey_valid: Miner(
+                uid=201,
+                network_address="https://valid.example",
+                valid=True,
+                alpha_stake=7,
+                capacity={},
+                hotkey=hotkey_valid,
+            ),
+        }
+    )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    job_payloads = {
+        hotkey_banned: [
+            {
+                "job_id": "job-banned",
+                "status": "success",
+                "job_type": "img-h100_pcie",
+                "is_audit_job": False,
+                "completed_at": now_iso,
+                "metrics": {"latency_ms": 900},
+            }
+        ],
+        hotkey_valid: [
+            {
+                "job_id": "job-valid",
+                "status": "success",
+                "job_type": "img-h100_pcie",
+                "is_audit_job": False,
+                "completed_at": now_iso,
+                "metrics": {"latency_ms": 800},
+            }
+        ],
+    }
+
+    score_service = ScoreService(
+        database_service,
+        job_service=_StubJobService(job_payloads),
+        miner_metagraph_service=metagraph,
+        netuid=1,
+        network="testnet",
+        ss58_client=_StubSS58Client({hotkey_banned}),
+    )
+
+    score_service.put(hotkey_banned, ScoreRecord(scores=0.9))
+
+    summary = asyncio.run(score_service.run_once())
+    assert summary is not None
+    assert summary.hotkeys_considered == 2
+
+    banned_record = score_service.get(hotkey_banned)
+    valid_record = score_service.get(hotkey_valid)
+
+    assert banned_record is not None
+    assert banned_record.scores == pytest.approx(0.0)
     assert valid_record is not None
     assert valid_record.scores > 0.0

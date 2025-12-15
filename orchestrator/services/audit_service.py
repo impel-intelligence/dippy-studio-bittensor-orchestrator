@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
+from orchestrator.clients.ss58_client import SS58Client
 from orchestrator.domain.miner import Miner
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.schemas.job import AuditStatus, JobRecord
@@ -33,10 +34,12 @@ class AuditService:
         miner_metagraph_service: MinerMetagraphService,
         audit_sample_size: float = 0.1,
         batch_limit: int = 100,
+        ss58_client: SS58Client | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._job_service = job_service
         self._miner_metagraph_service = miner_metagraph_service
+        self._ss58_client = ss58_client
         self._audit_sample_size = self._clamp_sample(audit_sample_size)
         self._batch_limit = max(1, int(batch_limit))
         self._logger = logger if logger is not None else LOGGER
@@ -61,12 +64,13 @@ class AuditService:
                         exc,
                     )
                     continue
-                if not updated:
-                    continue
-                if desired_valid:
-                    miners_marked_valid += 1
-                else:
-                    miners_marked_invalid += 1
+                if updated:
+                    if desired_valid:
+                        miners_marked_valid += 1
+                    else:
+                        miners_marked_invalid += 1
+                if not desired_valid:
+                    await self._record_ban(hotkey)
 
         summary = AuditRunSummary(
             timestamp=datetime.now(timezone.utc),
@@ -116,6 +120,23 @@ class AuditService:
         updated = self._clone_with_validity(miner, is_valid)
         self._miner_metagraph_service.upsert_miner(updated)
         return True
+
+    async def _record_ban(self, hotkey: str) -> None:
+        client = getattr(self, "_ss58_client", None)
+        if client is None:
+            return
+        candidate = (hotkey or "").strip()
+        if not candidate:
+            return
+
+        try:
+            await client.append_addresses([candidate])
+        except Exception as exc:  # pragma: no cover - network/logging guard
+            self._logger.warning(
+                "audit.apply_validity.ss58_append_failed hotkey=%s error=%s",
+                candidate,
+                exc,
+            )
 
     @staticmethod
     def _clone_with_validity(source: Miner, valid: bool) -> Miner:

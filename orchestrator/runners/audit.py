@@ -13,6 +13,7 @@ from urllib import error as urllib_error
 
 from sn_uuid import uuid7
 
+from orchestrator.clients.ss58_client import SS58Client
 from orchestrator.common.epistula_client import EpistulaClient
 from orchestrator.common.datetime import parse_datetime
 from orchestrator.common.job_store import AuditStatus, Job, JobRequest, JobStatus, JobType
@@ -696,6 +697,7 @@ class AuditCheckRunner(_BaseAuditRunner):
         network: str,
         apply_changes: bool = True,
         audit_failure_repository: AuditFailureRepository | None = None,
+        ss58_client: SS58Client | None = None,
         logger: StructuredLogger | logging.Logger | None = None,
     ) -> None:
         super().__init__(
@@ -716,6 +718,7 @@ class AuditCheckRunner(_BaseAuditRunner):
         self._job_relay = job_service.job_relay
         self._miner_client: MinerMetagraphService = miner_client
         self._audit_failure_repo = audit_failure_repository
+        self._ss58_client = ss58_client
 
     async def _run(self) -> AuditRunSummary | None:
         try:
@@ -804,6 +807,7 @@ class AuditCheckRunner(_BaseAuditRunner):
                 continue
 
             updated = self._increment_failed_audits(hotkey)
+            await self._record_ban(hotkey)
             if updated is None:
                 self._log(
                     "warning",
@@ -875,6 +879,21 @@ class AuditCheckRunner(_BaseAuditRunner):
         failed_audits = getattr(miner, "failed_audits", 0) or 0
         updated = miner.model_copy(update={"failed_audits": failed_audits + 1, "valid": False})
         return self._miner_client.upsert_miner(updated)
+
+    async def _record_ban(self, hotkey: str) -> None:
+        client = getattr(self, "_ss58_client", None)
+        candidate = (hotkey or "").strip()
+        if client is None or not candidate:
+            return
+        try:
+            await client.append_addresses([candidate])
+        except Exception as exc:  # pragma: no cover - defensive network guard
+            self._log(
+                "warning",
+                "audit.check.ss58_append_failed",
+                hotkey=candidate,
+                error=str(exc),
+            )
 
     def _record_failure(
         self,

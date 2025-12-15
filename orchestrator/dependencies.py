@@ -8,6 +8,7 @@ from fastapi import Depends
 from orchestrator.clients.database import PostgresClient
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient
 from orchestrator.clients.subnet_state_client import SubnetStateClient
+from orchestrator.clients.ss58_client import SS58Client
 from orchestrator.common.epistula_client import EpistulaClient
 from orchestrator.common.server_context import ServerContext
 from orchestrator.common.structured_logging import StructuredLogger
@@ -34,6 +35,7 @@ class DependencyRegistry:
     config: Optional[OrchestratorConfig] = None
     subnet_state_service: Optional[SubnetStateClient] = None
     score_service: Optional[ScoreService] = None
+    ss58_client: Optional[SS58Client] = None
     epistula_client: Optional[EpistulaClient] = None
     sync_callback_waiter: Optional[SyncCallbackWaiter] = None
     job_service: Optional[JobService] = None
@@ -62,6 +64,7 @@ def set_dependencies(
     config: Optional[OrchestratorConfig] = None,
     subnet_state_service: Optional[SubnetStateClient] = None,
     score_service: Optional[ScoreService] = None,
+    ss58_client: Optional[SS58Client] = None,
     epistula_client: Optional[EpistulaClient] = None,
     sync_callback_waiter: Optional[SyncCallbackWaiter] = None,
     webhook_dispatcher: Optional[WebhookDispatcher] = None,
@@ -84,6 +87,8 @@ def set_dependencies(
         _registry.subnet_state_service = subnet_state_service
     if score_service is not None:
         _registry.score_service = score_service
+    if ss58_client is not None:
+        _registry.ss58_client = ss58_client
     if job_service is not None:
         _registry.job_service = job_service
     if epistula_client is not None:
@@ -126,6 +131,9 @@ def get_subnet_state_service() -> SubnetStateClient:
 
 def get_score_service() -> ScoreService:
     return _require("score_service", "ScoreService not initialized")  # type: ignore[return-value]
+
+def get_ss58_client() -> SS58Client:
+    return _require("ss58_client", "SS58 client not initialized")  # type: ignore[return-value]
 
 def get_sync_callback_waiter() -> SyncCallbackWaiter:
     return _require("sync_callback_waiter", "Sync callback waiter not initialized")  # type: ignore[return-value]

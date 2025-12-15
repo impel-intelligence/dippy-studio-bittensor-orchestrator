@@ -58,6 +58,18 @@ class _FakeMetagraphClient:
         return miner
 
 
+class _StubSS58Client:
+    def __init__(self) -> None:
+        self.append_calls: list[list[str]] = []
+
+    async def append_addresses(self, addresses: list[str]) -> bool:
+        self.append_calls.append(list(addresses))
+        return True
+
+    async def list_addresses(self) -> set[str]:
+        return set()
+
+
 @pytest.mark.asyncio
 async def test_audit_service_runs_in_dry_mode() -> None:
     jobs = [
@@ -126,3 +138,37 @@ async def test_audit_service_updates_validity_when_applied() -> None:
     assert summary.miners_marked_invalid == 1
     assert miner_client._miners["hk-b"].valid is False
     assert len(miner_client.updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_audit_service_records_ban_on_failure() -> None:
+    hotkey = "hk-ban-me"
+    jobs = [
+        _job_record(miner_hotkey=hotkey, audit_status=AuditStatus.audit_failed),
+    ]
+    job_service = _FakeJobService(jobs)
+    miner_client = _FakeMetagraphClient(
+        {
+            hotkey: Miner(
+                uid=3,
+                network_address="https://example-c",
+                valid=True,
+                alpha_stake=2,
+                hotkey=hotkey,
+            )
+        }
+    )
+    ss58_client = _StubSS58Client()
+
+    service = AuditService(
+        job_service=job_service,  # type: ignore[arg-type]
+        miner_metagraph_service=miner_client,  # type: ignore[arg-type]
+        audit_sample_size=1.0,
+        batch_limit=5,
+        ss58_client=ss58_client,  # type: ignore[arg-type]
+    )
+
+    summary = await service.run_once(apply_changes=True)
+
+    assert summary.miners_marked_invalid == 1
+    assert ss58_client.append_calls and ss58_client.append_calls[-1] == [hotkey]

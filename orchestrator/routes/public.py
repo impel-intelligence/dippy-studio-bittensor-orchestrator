@@ -8,6 +8,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from pydantic import AnyHttpUrl, BaseModel
 
+from orchestrator.clients.ss58_client import SS58Client
 from orchestrator.domain.miner import Miner
 from orchestrator.common.job_store import JobStatus, JobType
 from orchestrator.common.structured_logging import StructuredLogger
@@ -21,6 +22,7 @@ from orchestrator.dependencies import (
     get_listen_service,
     get_miner_metagraph_service,
     get_score_service,
+    get_ss58_client,
     get_sync_callback_waiter,
     get_structured_logger,
 )
@@ -275,11 +277,14 @@ def create_public_router() -> APIRouter:
         score_service: ScoreService = Depends(get_score_service),
         metagraph: MinerMetagraphService = Depends(get_miner_metagraph_service),
         job_service: JobService = Depends(get_job_service),
+        ss58_client: SS58Client = Depends(get_ss58_client),
     ) -> ScoresResponse:
         try:
             _ = await request.json()
         except Exception:
             pass
+
+        banned_hotkeys = await ss58_client.list_addresses()
 
         last_update = score_service.last_update()
         if last_update is not None:
@@ -291,7 +296,7 @@ def create_public_router() -> APIRouter:
                 miner = metagraph_state.get(hotkey)
                 failed_audits = getattr(miner, "failed_audits", 0) if miner else 0
                 is_invalid = miner is not None and not bool(getattr(miner, "valid", True))
-                slashed = failed_audits > 0 or is_invalid
+                slashed = hotkey in banned_hotkeys or failed_audits > 0 or is_invalid
                 status_value = "SLASHED" if slashed else "COMPLETED"
                 total_score = 0.0 if slashed else float(record.scores)
                 scores_payload[hotkey] = ScorePayload(
@@ -305,8 +310,8 @@ def create_public_router() -> APIRouter:
 
             if empty_scores:
                 payload = ScorePayload(
-                status="COMPLETED",
-                score=ScoreValue(total_score=1.0),
+                    status="COMPLETED",
+                    score=ScoreValue(total_score=1.0),
                 )
                 scores_payload[BURN_HOTKEY] = payload
             stats = {
@@ -322,6 +327,7 @@ def create_public_router() -> APIRouter:
         return await build_scores_from_state(
             state,
             job_relay_client=job_service.job_relay,
+            banned_hotkeys=set(banned_hotkeys),
         )
 
     @router.get(

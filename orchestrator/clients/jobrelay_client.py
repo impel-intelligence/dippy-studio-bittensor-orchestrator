@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from uuid import UUID
 
 import httpx
@@ -28,8 +28,21 @@ class BaseJobRelayClient:
         logger.debug("jobrelay.fetch.noop job_id=%s", job_id)
         return None
 
-    async def list_jobs(self, *, limit: int | None = None) -> list[Dict[str, Any]]:  # pragma: no cover - noop
-        logger.debug("jobrelay.list.noop limit=%s", limit)
+    async def list_jobs(
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        source: str | None = None,
+        limit: int | None = None,
+    ) -> list[Dict[str, Any]]:  # pragma: no cover - noop
+        logger.debug(
+            "jobrelay.list.noop start=%s end=%s source=%s limit=%s",
+            start.isoformat() if start else None,
+            end.isoformat() if end else None,
+            source,
+            limit,
+        )
         return []
 
     async def list_recent_jobs(self, *, limit: int) -> list[Dict[str, Any]]:  # pragma: no cover - noop
@@ -90,10 +103,27 @@ class JobRelayHttpClient(BaseJobRelayClient):
             return None
         return response
 
-    async def list_jobs(self, *, limit: int | None = None) -> list[Dict[str, Any]]:
-        if limit is not None and limit > 0:
-            return await self.list_recent_jobs(limit=limit)
-        payload = await self._request("GET", "/jobs", json=None, params=None)
+    async def list_jobs(
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        source: str | None = None,
+        limit: int | None = None,
+    ) -> list[Dict[str, Any]]:
+        params: Dict[str, Any] = {}
+        if start is not None:
+            params["start"] = self._normalize_timestamp(start)
+        if end is not None:
+            params["end"] = self._normalize_timestamp(end)
+        if source:
+            params["source"] = source
+        if limit is not None:
+            try:
+                params["limit"] = max(0, int(limit))
+            except (TypeError, ValueError):
+                params["limit"] = 0
+        payload = await self._request("GET", "/jobs", json=None, params=params or None)
         if isinstance(payload, dict):
             jobs = payload.get("jobs", [])
             if isinstance(jobs, list):
@@ -101,13 +131,7 @@ class JobRelayHttpClient(BaseJobRelayClient):
         return []
 
     async def list_recent_jobs(self, *, limit: int) -> list[Dict[str, Any]]:
-        params: Dict[str, Any] = {"limit": int(limit)}
-        payload = await self._request("GET", "/jobs/recent", json=None, params=params)
-        if isinstance(payload, dict):
-            jobs = payload.get("jobs", [])
-            if isinstance(jobs, list):
-                return jobs
-        return []
+        return await self.list_jobs(limit=limit)
 
     async def list_jobs_for_hotkey(
         self,
@@ -116,14 +140,7 @@ class JobRelayHttpClient(BaseJobRelayClient):
     ) -> list[Dict[str, Any]]:
         params: Dict[str, Any] | None = None
         if since is not None:
-            cutoff = since
-            if cutoff.tzinfo is None:
-                cutoff = cutoff.replace(tzinfo=timezone.utc)
-            else:
-                cutoff = cutoff.astimezone(timezone.utc)
-            params = {
-                "since": cutoff.isoformat().replace("+00:00", "Z"),
-            }
+            params = {"since": self._normalize_timestamp(since)}
         payload = await self._request(
             "GET",
             f"/hotkeys/{hotkey}/jobs",
@@ -137,7 +154,7 @@ class JobRelayHttpClient(BaseJobRelayClient):
         return []
 
     async def verify_connection(self) -> None:
-        await self._request("GET", "/jobs", json=None, params=None)
+        await self._request("GET", "/health", json=None, params=None)
 
     async def _request(
         self,
@@ -147,7 +164,7 @@ class JobRelayHttpClient(BaseJobRelayClient):
         *,
         params: Optional[Dict[str, Any]],
         allow_404: bool = False,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Any:
         url = f"{self._base_url}{path}"
         headers: Dict[str, str] = {}
         if self._auth_token:
@@ -168,12 +185,20 @@ class JobRelayHttpClient(BaseJobRelayClient):
                     exc.response.text if exc.response else "",
                 )
                 raise
-            if response.content:
-                try:
-                    return response.json()
-                except ValueError:  # pragma: no cover - response not json
-                    return None
-            return None
+        if response.content:
+            try:
+                return response.json()
+            except ValueError:  # pragma: no cover - response not json
+                return None
+        return None
+
+    @staticmethod
+    def _normalize_timestamp(value: datetime) -> str:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        return value.isoformat().replace("+00:00", "Z")
 
 
 __all__ = [

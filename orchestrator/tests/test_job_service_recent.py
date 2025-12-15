@@ -20,10 +20,10 @@ class _StubJobRelay:
     def __init__(self, records: list[dict]):
         self._records = records
 
-    async def list_jobs(self) -> list[dict]:
+    async def list_jobs(self, **_: object) -> list[dict]:
         return self._records
 
-    async def list_recent_jobs(self, *, limit: int) -> list[dict]:
+    async def list_recent_jobs(self, *, limit: int, **_: object) -> list[dict]:
         return self._records[:limit]
 
 

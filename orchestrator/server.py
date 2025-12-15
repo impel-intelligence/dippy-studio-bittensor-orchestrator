@@ -19,6 +19,7 @@ from orchestrator.common.stubbing import resolve_audit_miner
 from orchestrator.config import OrchestratorConfig, load_config
 from orchestrator.dependencies import set_dependencies
 from orchestrator.routes import create_internal_router, create_public_router
+from orchestrator.clients.ss58_client import SS58Client
 from orchestrator.services.audit_service import AuditService
 from orchestrator.services.callback_service import CallbackService
 from orchestrator.services.job_service import JobService
@@ -278,6 +279,11 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             )
             raise
 
+        self.ss58_client = SS58Client(
+            self.config.ss58.base_url,
+            timeout_seconds=self.config.ss58.timeout_seconds,
+        )
+
         self.job_service = JobService(job_relay=self.job_relay_client)
         self.score_service = ScoreService(
             database_service=self.database_service,
@@ -286,6 +292,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             netuid=self.netuid,
             network=self.network,
             miner_metagraph_service=self.miner_metagraph_service,
+            ss58_client=self.ss58_client,
             ema_alpha=self.config.scores.ema_alpha,
             ema_half_life_seconds=self.config.scores.ema_half_life_seconds,
             failure_penalty_weight=self.config.scores.failure_penalty_weight,
@@ -297,6 +304,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             job_service=self.job_service,
             miner_metagraph_service=self.miner_metagraph_service,
             audit_sample_size=self.config.audit_sample_size,
+            ss58_client=self.ss58_client,
             logger=self.server_context.logger,
         )
 
@@ -417,6 +425,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             config=self.config,
             subnet_state_service=self.subnet_state_service,
             score_service=self.score_service,
+            ss58_client=self.ss58_client,
             epistula_client=self.epistula_client,
             sync_callback_waiter=self.sync_callback_waiter,
             webhook_dispatcher=self.webhook_dispatcher,
@@ -479,7 +488,7 @@ def create_app() -> FastAPI:
 
 
 if __name__ == "__main__":
-    default_port = int(os.getenv("ORCHESTRATOR_PORT", "42169"))
+    default_port = int(os.getenv("ORCHESTRATOR_PORT", "42069"))
     parser = argparse.ArgumentParser(description="Orchestrator Service")
     parser.add_argument(
         "--live-reload",
@@ -490,7 +499,7 @@ if __name__ == "__main__":
         "--port",
         type=int,
         default=default_port,
-        help="Port to bind the server (default comes from ORCHESTRATOR_PORT or 42169)",
+        help="Port to bind the server (default comes from ORCHESTRATOR_PORT or 42069)",
     )
     
     args = parser.parse_args()
