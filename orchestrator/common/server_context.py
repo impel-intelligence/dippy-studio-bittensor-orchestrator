@@ -26,6 +26,8 @@ class ServerContext:
         score_service: "ScoreService | None" = None,
     ) -> "ServerContext":
         return ServerContext(
-            logger=StructuredLogger(name=service_name, base_context={"service": service_name}),
+            logger=StructuredLogger(
+                name=service_name, base_context={"service": service_name}
+            ),
             score_service=score_service,
         )

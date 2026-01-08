@@ -24,13 +24,19 @@ class ApiClient:
     def get(self, path: str, **kwargs: Any) -> httpx.Response:  # type: ignore[arg-type]
         return self.client.get(path, **kwargs)
 
-    def post(self, path: str, json: Optional[Dict[str, Any]] = None, **kwargs: Any) -> httpx.Response:  # type: ignore[arg-type]
+    def post(
+        self, path: str, json: Optional[Dict[str, Any]] = None, **kwargs: Any
+    ) -> httpx.Response:  # type: ignore[arg-type]
         return self.client.post(path, json=json, **kwargs)
 
-    def put(self, path: str, json: Optional[Dict[str, Any]] = None, **kwargs: Any) -> httpx.Response:  # type: ignore[arg-type]
+    def put(
+        self, path: str, json: Optional[Dict[str, Any]] = None, **kwargs: Any
+    ) -> httpx.Response:  # type: ignore[arg-type]
         return self.client.put(path, json=json, **kwargs)
 
-    def patch(self, path: str, json: Optional[Dict[str, Any]] = None, **kwargs: Any) -> httpx.Response:  # type: ignore[arg-type]
+    def patch(
+        self, path: str, json: Optional[Dict[str, Any]] = None, **kwargs: Any
+    ) -> httpx.Response:  # type: ignore[arg-type]
         return self.client.patch(path, json=json, **kwargs)
 
     def delete(self, path: str, **kwargs: Any) -> httpx.Response:  # type: ignore[arg-type]
@@ -40,4 +46,3 @@ class ApiClient:
         """Hit the canonical `/health` endpoint and return the response."""
 
         return self.get("/health")
-

@@ -11,9 +11,13 @@ from .signing import verify_signature
 from .schemas import Entry
 
 
-def verify_chain(head_cid: str, public_key_hex: str, gateway_base: str, timeout_seconds: int = 20) -> List[str]:
+def verify_chain(
+    head_cid: str, public_key_hex: str, gateway_base: str, timeout_seconds: int = 20
+) -> List[str]:
     """Verify signatures for every entry starting from head and return addresses (oldest->newest)."""
-    repo = EntryRepository(gateway_base=gateway_base, timeout_seconds=timeout_seconds, verify_key_hex=None)
+    repo = EntryRepository(
+        gateway_base=gateway_base, timeout_seconds=timeout_seconds, verify_key_hex=None
+    )
     ordered_entries: List[Entry] = []
     for cid, entry in repo.traverse(head_cid):
         verify_signature(public_key_hex, entry.data, entry.signature)
@@ -25,15 +29,21 @@ def verify_chain(head_cid: str, public_key_hex: str, gateway_base: str, timeout_
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Verify SS58 append-only log signatures.")
+    parser = argparse.ArgumentParser(
+        description="Verify SS58 append-only log signatures."
+    )
     parser.add_argument("--head", required=True, help="Head CID to verify from")
-    parser.add_argument("--public-key-hex", required=True, help="Ed25519 public key hex (0x allowed)")
+    parser.add_argument(
+        "--public-key-hex", required=True, help="Ed25519 public key hex (0x allowed)"
+    )
     parser.add_argument(
         "--gateway",
         default="https://gateway.pinata.cloud/ipfs",
         help="Gateway base URL used to fetch entries",
     )
-    parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds")
+    parser.add_argument(
+        "--timeout", type=int, default=20, help="HTTP timeout in seconds"
+    )
     args = parser.parse_args(argv)
 
     try:

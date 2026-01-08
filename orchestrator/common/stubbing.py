@@ -1,8 +1,8 @@
-DEST_HOTKEY = '5HauDwEzvs3MHhLooiiL7GWpxFGTuVzhwDBb5NqDyES25VLd'
+DEST_HOTKEY = "5HauDwEzvs3MHhLooiiL7GWpxFGTuVzhwDBb5NqDyES25VLd"
 
 from orchestrator.domain.miner import Miner
 
-DEFAULT_AUDIT_MINER_NETWORK_ADDRESS = "https://minertest.dippy-bittensor.studio"
+DEFAULT_AUDIT_MINER_NETWORK_ADDRESS = "https://audit-miner.example.com"
 
 AUDIT_MINER = Miner(
     uid=74,

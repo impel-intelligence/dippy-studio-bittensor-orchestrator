@@ -1,5 +1,5 @@
 database:
-  url: postgresql://orchestrator:orchestrator@postgres:5432/orchestrator
+  url: postgresql://<username>:<password>@<host>:5432/<database>
   min_connections: 1
   max_connections: 10
 
@@ -43,6 +43,8 @@ scores:
   ema_half_life_seconds: 604800
   failure_penalty_weight: 0.2
   lookback_days: 7
+  pending_timeout_seconds: 30.0
+  failure_slash_threshold: 3
 
 listen:
   sync:

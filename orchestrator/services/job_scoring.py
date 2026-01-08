@@ -23,7 +23,9 @@ def job_latency_ms(job: Mapping[str, Any]) -> Optional[float]:
     return _extract_latency_ms(job)
 
 
-def job_to_score(job: Mapping[str, Any], *, max_latency_ms: float = DEFAULT_MAX_LATENCY_MS) -> float:
+def job_to_score(
+    job: Mapping[str, Any], *, max_latency_ms: float = DEFAULT_MAX_LATENCY_MS
+) -> float:
     """Score an inference job based on its latency.
 
     The score falls in the range [0, 1], where faster jobs earn a higher score.
@@ -95,12 +97,18 @@ def callback_latency_ms(job: Mapping[str, Any]) -> Optional[float]:
         callback_received_at = None
 
     dispatched_at = job.get("dispatched_at") if isinstance(job, Mapping) else None
-    miner_received_at = job.get("miner_received_at") if isinstance(job, Mapping) else None
-    response_timestamp = job.get("response_timestamp") if isinstance(job, Mapping) else None
+    miner_received_at = (
+        job.get("miner_received_at") if isinstance(job, Mapping) else None
+    )
+    response_timestamp = (
+        job.get("response_timestamp") if isinstance(job, Mapping) else None
+    )
     completed_at = job.get("completed_at") if isinstance(job, Mapping) else None
 
     start_dt = _coerce_datetime(dispatched_at or miner_received_at)
-    end_dt = _coerce_datetime(response_timestamp or completed_at or callback_received_at)
+    end_dt = _coerce_datetime(
+        response_timestamp or completed_at or callback_received_at
+    )
     if start_dt is None or end_dt is None:
         return None
 

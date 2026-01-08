@@ -12,8 +12,15 @@ from pathlib import PurePosixPath
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
-from orchestrator.clients.jobrelay_client import BaseJobRelayClient
-from orchestrator.common.datetime import parse_datetime, parse_timestamp, timestamp_to_iso
+from orchestrator.clients.jobrelay_client import (
+    BaseJobRelayClient,
+    JobRelayTimeoutError,
+)
+from orchestrator.common.datetime import (
+    parse_datetime,
+    parse_timestamp,
+    timestamp_to_iso,
+)
 from orchestrator.common.job_store import (
     AuditStatus,
     Job,
@@ -22,6 +29,7 @@ from orchestrator.common.job_store import (
     JobStatus,
     JobType,
 )
+from orchestrator.common.job_sources import JobSource, normalize_job_source
 from orchestrator.schemas.job import JobRecord
 from orchestrator.services.exceptions import (
     JobNotFound,
@@ -35,6 +43,7 @@ from sn_uuid import uuid7
 
 try:
     from opentelemetry import trace
+
     _tracer = trace.get_tracer(__name__)
 except ImportError:
     trace = None  # type: ignore
@@ -52,7 +61,9 @@ def _set_span_attributes(**attributes: Any) -> None:
         return
     for key, value in attributes.items():
         if value is not None:
-            span.set_attribute(key, str(value) if not isinstance(value, (bool, int, float)) else value)
+            span.set_attribute(
+                key, str(value) if not isinstance(value, (bool, int, float)) else value
+            )
 
 
 class JobWaitTimeoutError(TimeoutError):
@@ -71,7 +82,6 @@ _TERMINAL_JOB_STATUSES = {
 
 
 class JobService:
-
     def __init__(self, job_relay: BaseJobRelayClient) -> None:
         if job_relay is None:
             raise ValueError("job_relay client must be provided")
@@ -84,6 +94,7 @@ class JobService:
         hotkey: str,
         *,
         job_id: uuid.UUID | None = None,
+        source: JobSource | str | None = None,
     ) -> Job:
         try:
             prepared_payload = self._prepare_payload(payload)
@@ -97,10 +108,12 @@ class JobService:
 
             job_identifier = job_id or uuid7()
             created_at = time.time()
+            source_value = normalize_job_source(source)
 
             relay_payload = {
                 "job_type": self._job_type_to_str(job_type),
                 "miner_hotkey": hotkey,
+                "source": source_value,
                 "payload": prepared_payload,
                 "creation_timestamp": timestamp_to_iso(created_at),
                 "status": JobStatus.PENDING.value,
@@ -111,7 +124,11 @@ class JobService:
                 "prompt_seed": seed,
             }
 
-            await self.job_relay.create_job(job_identifier, relay_payload)
+            returned_job_id = await self.job_relay.create_job(
+                job_identifier, relay_payload
+            )
+            if returned_job_id:
+                job_identifier = returned_job_id
 
             # Log job creation for observability with structured attributes
             job_type_str = self._job_type_to_str(job_type)
@@ -212,7 +229,9 @@ class JobService:
         record = await self._fetch_job_record(job_id)
         return self._job_from_record(record)
 
-    async def mark_job_prepared(self, job_id: uuid.UUID, prepared_at: float | None = None) -> Job:
+    async def mark_job_prepared(
+        self, job_id: uuid.UUID, prepared_at: float | None = None
+    ) -> Job:
         timestamp = prepared_at if prepared_at is not None else time.time()
         updates = {
             "prepared_at": timestamp_to_iso(timestamp),
@@ -222,7 +241,9 @@ class JobService:
         await self._sync_job_update(job_id, updates)
         return await self.get_job(job_id)
 
-    async def mark_job_dispatched(self, job_id: uuid.UUID, dispatched_at: float | None = None) -> Job:
+    async def mark_job_dispatched(
+        self, job_id: uuid.UUID, dispatched_at: float | None = None
+    ) -> Job:
         timestamp = dispatched_at if dispatched_at is not None else time.time()
         iso_timestamp = timestamp_to_iso(timestamp)
         updates = {
@@ -293,7 +314,11 @@ class JobService:
 
         completed_items: list[tuple[datetime, Job]] = []
         completed_states = _TERMINAL_JOB_STATUSES
+        audit_original = JobSource.AUDIT_ORIGINAL.value
         for record in records:
+            source = normalize_job_source(record.get("source"))
+            if source and source.lower() == audit_original:
+                continue
             status = self._parse_job_status(record.get("status"))
             if status not in completed_states:
                 continue
@@ -346,7 +371,9 @@ class JobService:
         while True:
             if is_disconnected is not None and await is_disconnected():
                 logger.info("job.wait_cancelled job_id=%s", job_id)
-                raise JobWaitCancelledError("Client disconnected while waiting for job completion")
+                raise JobWaitCancelledError(
+                    "Client disconnected while waiting for job completion"
+                )
 
             job = await self.get_job(job_id)
             if job.status in _TERMINAL_JOB_STATUSES:
@@ -354,16 +381,26 @@ class JobService:
 
             now = time.monotonic()
             if timeout == 0.0 or now >= deadline:
-                raise JobWaitTimeoutError(f"Job {job_id} did not complete within {timeout} seconds")
+                raise JobWaitTimeoutError(
+                    f"Job {job_id} did not complete within {timeout} seconds"
+                )
 
             remaining = deadline - now
-            sleep_for = poll_interval if timeout == float("inf") else min(poll_interval, max(remaining, 0.0))
+            sleep_for = (
+                poll_interval
+                if timeout == float("inf")
+                else min(poll_interval, max(remaining, 0.0))
+            )
             if sleep_for <= 0.0:
-                raise JobWaitTimeoutError(f"Job {job_id} did not complete within {timeout} seconds")
+                raise JobWaitTimeoutError(
+                    f"Job {job_id} did not complete within {timeout} seconds"
+                )
 
             await asyncio.sleep(sleep_for)
 
-    async def _sync_job_update(self, job_id: uuid.UUID, updates: Dict[str, Any]) -> None:
+    async def _sync_job_update(
+        self, job_id: uuid.UUID, updates: Dict[str, Any]
+    ) -> None:
         if not updates:
             return
         try:
@@ -398,6 +435,16 @@ class JobService:
                 source=source,
                 limit=limit,
             )
+        except JobRelayTimeoutError as exc:
+            logger.warning(
+                "jobrelay.list_timeout start=%s end=%s source=%s limit=%s",
+                start.isoformat() if start else None,
+                end.isoformat() if end else None,
+                source,
+                limit,
+                exc_info=exc,
+            )
+            return []
         except Exception as exc:  # noqa: BLE001
             logger.exception("jobrelay.list_failed")
             raise JobRelayError("Failed to list jobs from relay") from exc
@@ -486,6 +533,12 @@ class JobService:
         return key.lower() == "callback_secret"
 
     @staticmethod
+    def _is_source_field(key: Any) -> bool:
+        if not key or not isinstance(key, str):
+            return False
+        return key.lower() == "source"
+
+    @staticmethod
     def _strip_image_filename(value: Any) -> Any:
         if not isinstance(value, str):
             return value
@@ -496,7 +549,7 @@ class JobService:
         return basename or cleaned
 
     def _sanitize_job_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        """Hash prompts and strip image paths from a job record."""
+        """Hash prompts, strip image paths, and drop sensitive metadata from a job record."""
 
         def _sanitize_value(value: Any, *, key: str | None = None) -> Any:
             key_lower = key.lower() if isinstance(key, str) else ""
@@ -505,18 +558,23 @@ class JobService:
                     child_key: _sanitize_value(child_value, key=child_key)
                     for child_key, child_value in value.items()
                     if not self._is_callback_secret_field(child_key)
+                    and not self._is_source_field(child_key)
                 }
             if isinstance(value, list):
                 return [_sanitize_value(item, key=key) for item in value]
             if key_lower and "prompt" in key_lower and "seed" not in key_lower:
                 return self._hash_value(value)
-            if key_lower and "image" in key_lower and ("url" in key_lower or "uri" in key_lower):
+            if (
+                key_lower
+                and "image" in key_lower
+                and ("url" in key_lower or "uri" in key_lower)
+            ):
                 return self._strip_image_filename(value)
             return value
 
         sanitized: Dict[str, Any] = {}
         for key, value in deepcopy(record).items():
-            if self._is_callback_secret_field(key):
+            if self._is_callback_secret_field(key) or self._is_source_field(key):
                 continue
             sanitized[key] = _sanitize_value(value, key=key)
         return sanitized
@@ -546,8 +604,12 @@ class JobService:
                 timestamp=response_timestamp or time.time(),
             )
 
-        callback_secret = record.get("callback_secret") or request_payload.get("callback_secret")
-        prompt_seed = self._normalize_seed(record.get("prompt_seed") or request_payload.get("seed"))
+        callback_secret = record.get("callback_secret") or request_payload.get(
+            "callback_secret"
+        )
+        prompt_seed = self._normalize_seed(
+            record.get("prompt_seed") or request_payload.get("seed")
+        )
 
         prepared_at = parse_timestamp(record.get("prepared_at"))
         dispatched_at = parse_timestamp(

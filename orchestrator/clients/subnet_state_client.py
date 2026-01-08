@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MinerRegistry:
-
     address: str
     port: str
 
@@ -44,7 +43,9 @@ def _extract_raw_data(data: dict) -> Optional[str]:
         fields = info.get("fields", ())
         if fields and isinstance(fields[0], tuple) and isinstance(fields[0][0], dict):
             raw_dict = fields[0][0]
-            raw_key = next((k for k in raw_dict.keys() if str(k).startswith("Raw")), None)
+            raw_key = next(
+                (k for k in raw_dict.keys() if str(k).startswith("Raw")), None
+            )
             if raw_key and raw_dict[raw_key]:
                 raw_value = raw_dict[raw_key]
                 if isinstance(raw_value, (list, tuple)) and raw_value:
@@ -57,7 +58,6 @@ def _extract_raw_data(data: dict) -> Optional[str]:
 
 
 class SubnetStateClient:
-
     def __init__(
         self,
         *,
@@ -157,7 +157,9 @@ class SubnetStateClient:
             global _BT_IMPORT_LOGGED
             if not _BT_IMPORT_LOGGED:
                 logger.warning(
-                    "subnet.bittensor_unavailable network=%s", self._network, exc_info=BT_IMPORT_ERROR
+                    "subnet.bittensor_unavailable network=%s",
+                    self._network,
+                    exc_info=BT_IMPORT_ERROR,
                 )
                 _BT_IMPORT_LOGGED = True
             return None

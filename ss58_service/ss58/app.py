@@ -47,6 +47,7 @@ def create_app() -> FastAPI:
             repository = EntryRepository(
                 gateway_base=str(settings.pinata_gateway_base),
                 timeout_seconds=settings.pinata_timeout_seconds,
+                gateway_token=settings.pinata_gateway_token,
                 verify_key_hex=signer.public_hex,
             )
             app.state.service = SS58Service(
@@ -72,8 +73,14 @@ def create_app() -> FastAPI:
     def get_head(service: SS58Service = Depends(get_service)) -> HeadResponse:
         state: HeadState | None = service.head()
         if not state:
-            return HeadResponse(cid=None, updated_at=None, public_key_hex=service.public_key_hex)
-        return HeadResponse(cid=state.cid, updated_at=state.updated_at, public_key_hex=service.public_key_hex)
+            return HeadResponse(
+                cid=None, updated_at=None, public_key_hex=service.public_key_hex
+            )
+        return HeadResponse(
+            cid=state.cid,
+            updated_at=state.updated_at,
+            public_key_hex=service.public_key_hex,
+        )
 
     @app.post("/genesis", response_model=AddResponse, tags=["append"])
     def create_genesis(service: SS58Service = Depends(get_service)) -> AddResponse:
@@ -81,7 +88,9 @@ def create_app() -> FastAPI:
         return service.create_genesis()
 
     @app.post("/add", response_model=AddResponse, tags=["append"])
-    def add_addresses(payload: AddRequest, service: SS58Service = Depends(get_service)) -> AddResponse:
+    def add_addresses(
+        payload: AddRequest, service: SS58Service = Depends(get_service)
+    ) -> AddResponse:
         """Append a new entry containing SS58 addresses."""
         try:
             return service.append(payload.addresses)

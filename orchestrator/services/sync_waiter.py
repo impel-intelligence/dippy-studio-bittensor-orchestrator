@@ -137,7 +137,9 @@ class InMemorySyncCallbackWaiter(BaseSyncCallbackWaiter):
         try:
             while True:
                 if is_disconnected is not None and await is_disconnected():
-                    raise JobWaitCancelledError("Client disconnected while waiting for callback")
+                    raise JobWaitCancelledError(
+                        "Client disconnected while waiting for callback"
+                    )
 
                 if future.done():
                     if future.cancelled():
@@ -147,7 +149,9 @@ class InMemorySyncCallbackWaiter(BaseSyncCallbackWaiter):
                 if not is_infinite and deadline is not None:
                     now = time.monotonic()
                     if now >= deadline:
-                        raise JobWaitTimeoutError(f"Job {job_id} did not complete within {timeout} seconds")
+                        raise JobWaitTimeoutError(
+                            f"Job {job_id} did not complete within {timeout} seconds"
+                        )
                     remaining = deadline - now
                     wait_for = min(poll, max(remaining, 0.0))
                 else:
@@ -273,7 +277,9 @@ class RedisSyncCallbackWaiter(BaseSyncCallbackWaiter):
         channel = self._channel(job_id)
         try:
             while True:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=1.0
+                )
                 if message is None:
                     await asyncio.sleep(0.01)
                     continue
@@ -295,15 +301,23 @@ class RedisSyncCallbackWaiter(BaseSyncCallbackWaiter):
     async def _store_result(self, result: SyncCallbackResult) -> None:
         try:
             payload = self._serialize_result(result)
-            await self._redis.set(self._result_key(result.job_id), payload, ex=self._ttl)
+            await self._redis.set(
+                self._result_key(result.job_id), payload, ex=self._ttl
+            )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("redis_waiter.store_failed job_id=%s error=%s", result.job_id, exc)
+            logger.warning(
+                "redis_waiter.store_failed job_id=%s error=%s", result.job_id, exc
+            )
 
     async def _publish_result(self, result: SyncCallbackResult) -> None:
         try:
-            await self._redis.publish(self._channel(result.job_id), self._serialize_result(result))
+            await self._redis.publish(
+                self._channel(result.job_id), self._serialize_result(result)
+            )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("redis_waiter.publish_failed job_id=%s error=%s", result.job_id, exc)
+            logger.warning(
+                "redis_waiter.publish_failed job_id=%s error=%s", result.job_id, exc
+            )
 
     async def _fetch_result(self, job_id: uuid.UUID) -> SyncCallbackResult | None:
         try:
@@ -316,10 +330,16 @@ class RedisSyncCallbackWaiter(BaseSyncCallbackWaiter):
         return self._deserialize_result(raw)
 
     def _serialize_result(self, result: SyncCallbackResult) -> str:
-        image_b64 = base64.b64encode(result.image_bytes).decode("utf-8") if result.image_bytes is not None else None
+        image_b64 = (
+            base64.b64encode(result.image_bytes).decode("utf-8")
+            if result.image_bytes is not None
+            else None
+        )
         payload = {
             "job_id": str(result.job_id),
-            "status": result.status.value if isinstance(result.status, JobStatus) else str(result.status),
+            "status": result.status.value
+            if isinstance(result.status, JobStatus)
+            else str(result.status),
             "payload": result.payload,
             "image_b64": image_b64,
             "content_type": result.content_type,
@@ -337,8 +357,14 @@ class RedisSyncCallbackWaiter(BaseSyncCallbackWaiter):
             data = json.loads(raw)
             job_id = uuid.UUID(str(data.get("job_id")))
             status_value = data.get("status") or JobStatus.FAILED.value
-            status = JobStatus(status_value) if status_value in JobStatus._value2member_map_ else JobStatus.FAILED
-            image_bytes = base64.b64decode(data["image_b64"]) if data.get("image_b64") else None
+            status = (
+                JobStatus(status_value)
+                if status_value in JobStatus._value2member_map_
+                else JobStatus.FAILED
+            )
+            image_bytes = (
+                base64.b64decode(data["image_b64"]) if data.get("image_b64") else None
+            )
             return SyncCallbackResult(
                 job_id=job_id,
                 status=status,

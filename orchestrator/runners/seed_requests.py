@@ -83,7 +83,9 @@ class SeedRequestsRunner(InstrumentedRunner[SeedRequestsSummary]):
             self._log(
                 "info",
                 "seed.requests.no_targets",
-                job_type=str(job_type.value if isinstance(job_type, JobType) else job_type),
+                job_type=str(
+                    job_type.value if isinstance(job_type, JobType) else job_type
+                ),
             )
             return SeedRequestsSummary(
                 source_job_id=audit_job.job_id,
@@ -114,7 +116,9 @@ class SeedRequestsRunner(InstrumentedRunner[SeedRequestsSummary]):
     def _start_fields(self) -> dict[str, Any]:
         return {"netuid": self._netuid, "network": self._network}
 
-    def _complete_fields(self, result: SeedRequestsSummary | None, start_fields: dict[str, Any]) -> dict[str, Any]:
+    def _complete_fields(
+        self, result: SeedRequestsSummary | None, start_fields: dict[str, Any]
+    ) -> dict[str, Any]:
         if result is None:
             return {**start_fields, "status": "skipped"}
         return {
@@ -145,7 +149,8 @@ class SeedRequestsRunner(InstrumentedRunner[SeedRequestsSummary]):
         return [
             miner
             for miner in state.values()
-            if self._supports_job_type(miner, job_type) and self._has_network_address(miner)
+            if self._supports_job_type(miner, job_type)
+            and self._has_network_address(miner)
         ]
 
     @staticmethod
@@ -166,7 +171,9 @@ class SeedRequestsRunner(InstrumentedRunner[SeedRequestsSummary]):
 
         inference_caps = capacity.get("inference")
         if isinstance(inference_caps, (list, tuple, set)):
-            normalized = {str(item).strip().lower() for item in inference_caps if item is not None}
+            normalized = {
+                str(item).strip().lower() for item in inference_caps if item is not None
+            }
             if capability.strip().lower() in normalized:
                 return True
 

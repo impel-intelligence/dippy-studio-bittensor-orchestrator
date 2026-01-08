@@ -52,7 +52,9 @@ class PostgresClient:
         try:
             return make_conninfo(**params)
         except Exception:
-            filtered = [f"{key}={value}" for key, value in params.items() if value is not None]
+            filtered = [
+                f"{key}={value}" for key, value in params.items() if value is not None
+            ]
             return " ".join(filtered) if filtered else self._dsn
 
     @contextmanager

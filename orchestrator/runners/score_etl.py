@@ -67,7 +67,9 @@ class ScoreETLRunner(InstrumentedRunner[ScoreRunSummary]):
             "completed_at": summary.timestamp.isoformat(),
         }
 
-    def _complete_level(self, summary: ScoreRunSummary | None, start_fields: dict[str, Any]) -> str:  # noqa: ARG002
+    def _complete_level(
+        self, summary: ScoreRunSummary | None, start_fields: dict[str, Any]
+    ) -> str:  # noqa: ARG002
         if summary is None:
             return "info"
         return "info" if summary.success else "error"

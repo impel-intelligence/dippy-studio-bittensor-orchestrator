@@ -12,7 +12,6 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 class BaseUploader:
-
     def __init__(self) -> None:
         self._logger = logging.getLogger(__name__)
 
@@ -39,7 +38,6 @@ class BaseUploader:
 
 @dataclass
 class GCSUploader(BaseUploader):
-
     bucket: str
     prefix: str = "callbacks"
     credentials_path: Optional[Path] = None
@@ -55,7 +53,9 @@ class GCSUploader(BaseUploader):
         self._client = self._create_client()
         self._bucket = self._client.bucket(self.bucket)
         credentials_exists = (
-            self.credentials_path.exists() if isinstance(self.credentials_path, Path) else None
+            self.credentials_path.exists()
+            if isinstance(self.credentials_path, Path)
+            else None
         )
         self._logger.info(
             "callback.gcs_uploader_initialized bucket=%s prefix=%s credentials=%s credentials_exists=%s",

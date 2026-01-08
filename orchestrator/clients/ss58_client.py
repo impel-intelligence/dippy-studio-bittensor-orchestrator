@@ -75,6 +75,36 @@ class SS58Client:
             )
             return set()
 
+        return self._normalize_payload(payload)
+
+    def list_addresses_sync(self) -> set[str]:
+        """Synchronous version of list_addresses for use in non-async contexts."""
+        if not self._base_url:
+            return set()
+
+        url = f"{self._base_url}/addresses"
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.get(url)
+                response.raise_for_status()
+        except Exception as exc:  # pragma: no cover - defensive network guard
+            logger.warning("ss58_client.fetch_failed url=%s error=%s", url, exc)
+            return set()
+
+        try:
+            payload = response.json()
+        except Exception:  # pragma: no cover - non-JSON payload
+            logger.warning(
+                "ss58_client.fetch_invalid_json url=%s status=%s body_preview=%s",
+                url,
+                response.status_code,
+                response.text[:200],
+            )
+            return set()
+
+        return self._normalize_payload(payload)
+
+    def _normalize_payload(self, payload: object) -> set[str]:
         if isinstance(payload, dict):
             addresses_raw = payload.get("addresses", []) or []
         elif isinstance(payload, list):

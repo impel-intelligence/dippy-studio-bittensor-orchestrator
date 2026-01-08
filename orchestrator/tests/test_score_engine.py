@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Mapping
 
 import pytest
@@ -57,7 +57,11 @@ class MutableJobRelay(BaseJobRelayClient):
             completed = job.get("completed_at")
             event_time: datetime | None
             if isinstance(completed, datetime):
-                event_time = completed if completed.tzinfo else completed.replace(tzinfo=timezone.utc)
+                event_time = (
+                    completed
+                    if completed.tzinfo
+                    else completed.replace(tzinfo=timezone.utc)
+                )
             elif isinstance(completed, str):
                 try:
                     parsed = datetime.fromisoformat(completed.replace("Z", "+00:00"))
@@ -74,13 +78,37 @@ class MutableJobRelay(BaseJobRelayClient):
         return filtered
 
 
+class PendingJobRelay(BaseJobRelayClient):
+    def __init__(self) -> None:
+        self.jobs_by_hotkey: dict[str, list[dict[str, Any]]] = {}
+        self.updated: list[tuple[Any, dict[str, Any]]] = []
+
+    async def list_jobs_for_hotkey(
+        self,
+        hotkey: str,
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        return list(self.jobs_by_hotkey.get(hotkey, ()))
+
+    async def update_job(self, job_id: Any, updates: dict[str, Any]) -> None:
+        self.updated.append((job_id, updates))
+        for jobs in self.jobs_by_hotkey.values():
+            for job in jobs:
+                if str(job.get("job_id")) == str(job_id):
+                    job.update(updates)
+
+
 class StubJobService:
     def __init__(self, job_relay: BaseJobRelayClient) -> None:
         self.job_relay = job_relay
 
 
-def _build_engine(repository: InMemoryScoreRepository, relay: MutableJobRelay) -> ScoreEngine:
-    settings = ScoreSettings(ema_alpha=0.3, ema_half_life_seconds=60.0, failure_penalty_weight=0.7)
+def _build_engine(
+    repository: InMemoryScoreRepository, relay: BaseJobRelayClient
+) -> ScoreEngine:
+    settings = ScoreSettings(
+        ema_alpha=0.3, ema_half_life_seconds=60.0, failure_penalty_weight=0.7
+    )
     return ScoreEngine(
         repository=repository,  # type: ignore[arg-type]
         job_service=StubJobService(relay),  # type: ignore[arg-type]
@@ -97,6 +125,20 @@ def _success_job(job_id: str) -> dict[str, Any]:
         "job_type": JobType.FLUX_KONTEXT.value,
         "status": "success",
         "completed_at": datetime.now(timezone.utc).isoformat(),
+        "metrics": {"latency_ms": 1_000},
+    }
+
+
+def _job(
+    job_id: str,
+    status: str,
+    completed_at: datetime,
+) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "job_type": JobType.FLUX_KONTEXT.value,
+        "status": status,
+        "completed_at": completed_at.isoformat(),
         "metrics": {"latency_ms": 1_000},
     }
 
@@ -176,3 +218,58 @@ async def test_run_once_uses_rolling_window_without_double_counting() -> None:
 
     assert samples_second == samples_first
     assert successes_second == successes_first
+
+
+@pytest.mark.asyncio
+async def test_run_once_slashes_after_failure_threshold() -> None:
+    hotkey = "hk-slash"
+    repository = InMemoryScoreRepository()
+    relay = MutableJobRelay()
+    engine = _build_engine(repository, relay)
+
+    now = datetime.now(timezone.utc)
+    relay.jobs_by_hotkey[hotkey] = [
+        _job("job-success", "success", now - timedelta(minutes=4)),
+        _job("job-fail-1", "failed", now - timedelta(minutes=3)),
+        _job("job-fail-2", "failed", now - timedelta(minutes=2)),
+        _job("job-fail-3", "failed", now - timedelta(minutes=1)),
+    ]
+
+    summary = await engine.run_once(trace_hotkeys=[hotkey])
+    assert isinstance(summary, ScoreRunSummary)
+
+    record = repository.store[hotkey]
+    assert getattr(record, "failure_count", 0) == 3
+    assert record.scores == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_run_once_times_out_stale_pending_jobs() -> None:
+    hotkey = "hk-timeout"
+    repository = InMemoryScoreRepository()
+    relay = PendingJobRelay()
+    engine = _build_engine(repository, relay)
+
+    reference = datetime.now(timezone.utc)
+    relay.jobs_by_hotkey[hotkey] = [
+        {
+            "job_id": "job-timeout",
+            "job_type": JobType.FLUX_KONTEXT.value,
+            "miner_hotkey": hotkey,
+            "status": "pending",
+            "dispatched_at": (reference - timedelta(seconds=10)).isoformat(),
+            "expires_at": (reference - timedelta(seconds=1)).isoformat(),
+        }
+    ]
+
+    summary = await engine.run_once(trace_hotkeys=[hotkey])
+    assert isinstance(summary, ScoreRunSummary)
+    assert summary.jobs_considered == 1
+
+    record = repository.store[hotkey]
+    assert getattr(record, "failure_count", 0) == 1
+
+    assert relay.updated
+    _, updates = relay.updated[0]
+    assert updates["status"] == "timeout"
+    assert updates["completed_at"] == (reference - timedelta(seconds=1)).isoformat()

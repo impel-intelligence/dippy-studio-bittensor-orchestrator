@@ -10,6 +10,7 @@ from orchestrator.common.model_utils import dump_model
 from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.runners.base import InstrumentedRunner
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
+from orchestrator.clients.ss58_client import SS58Client
 
 if TYPE_CHECKING:
     from orchestrator.clients.subnet_state_client import SubnetStateClient
@@ -29,6 +30,7 @@ class MetagraphStateRunner(InstrumentedRunner[dict[str, Any]]):
         network: str,
         subnet_fetcher: Callable[[int, str], Optional[StateResult]],
         subnet_state_client: "SubnetStateClient | None" = None,
+        ss58_client: SS58Client | None = None,
         logger: StructuredLogger | logging.Logger | None = None,
     ) -> None:
         self._miner_metagraph_client = miner_metagraph_client
@@ -36,6 +38,7 @@ class MetagraphStateRunner(InstrumentedRunner[dict[str, Any]]):
         self._network = network
         self._fetch_subnet_state = subnet_fetcher
         self._subnet_state_client = subnet_state_client
+        self._ss58_client = ss58_client
         super().__init__(name="metagraph.sync", logger=logger)
 
     async def _run(self) -> dict[str, Any] | None:
@@ -67,8 +70,12 @@ class MetagraphStateRunner(InstrumentedRunner[dict[str, Any]]):
 
         state, block = state_result
 
+        filtered_state, banned_filtered = await self._filter_banned_hotkeys(state)
+
         try:
-            validated_state = self._miner_metagraph_client.validate_state(state)
+            validated_state = self._miner_metagraph_client.validate_state(
+                filtered_state
+            )
         except Exception as exc:  # pragma: no cover - logging safeguard
             self._log(
                 "error",
@@ -117,9 +124,52 @@ class MetagraphStateRunner(InstrumentedRunner[dict[str, Any]]):
         return {
             "block": block,
             "miner_count": len(validated_state),
-            "client_instance_id": getattr(self._miner_metagraph_client, "instance_id", None),
+            "banned_filtered": banned_filtered,
+            "client_instance_id": getattr(
+                self._miner_metagraph_client, "instance_id", None
+            ),
             "client_db_path": getattr(self._miner_metagraph_client, "db_path", None),
         }
+
+    async def _filter_banned_hotkeys(
+        self, state: Dict[str, Miner]
+    ) -> tuple[Dict[str, Miner], int]:
+        if not state or self._ss58_client is None:
+            return state, 0
+
+        try:
+            banned_hotkeys = await self._ss58_client.list_addresses()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            self._log(
+                "warning",
+                "metagraph.sync.banned_fetch_failed",
+                netuid=self._netuid,
+                network=self._network,
+                error=str(exc),
+            )
+            return state, 0
+
+        if not banned_hotkeys:
+            return state, 0
+
+        filtered = {
+            hotkey: miner
+            for hotkey, miner in state.items()
+            if hotkey not in banned_hotkeys
+        }
+        removed = len(state) - len(filtered)
+
+        if removed:
+            self._log(
+                "info",
+                "metagraph.sync.banned_filtered",
+                netuid=self._netuid,
+                network=self._network,
+                removed=removed,
+                banned_count=len(banned_hotkeys),
+            )
+
+        return filtered, removed
 
     def _populate_alpha_stake(self, state: Dict[str, Miner]) -> Dict[str, Miner]:
         if not state:
@@ -135,7 +185,9 @@ class MetagraphStateRunner(InstrumentedRunner[dict[str, Any]]):
     def _start_fields(self) -> Dict[str, Any]:
         return {"netuid": self._netuid, "network": self._network}
 
-    def _complete_fields(self, result: dict[str, Any] | None, start_fields: dict[str, Any]) -> dict[str, Any]:
+    def _complete_fields(
+        self, result: dict[str, Any] | None, start_fields: dict[str, Any]
+    ) -> dict[str, Any]:
         if result is None:
             return {**start_fields, "status": "skipped"}
         return {**start_fields, "status": "success", **result}
@@ -159,7 +211,9 @@ class MetagraphStateRunner(InstrumentedRunner[dict[str, Any]]):
             block=block,
             netuid=self._netuid,
             network=self._network,
-            client_instance_id=getattr(self._miner_metagraph_client, "instance_id", None),
+            client_instance_id=getattr(
+                self._miner_metagraph_client, "instance_id", None
+            ),
             client_db_path=getattr(self._miner_metagraph_client, "db_path", None),
             miner_state=serialized_state,
         )

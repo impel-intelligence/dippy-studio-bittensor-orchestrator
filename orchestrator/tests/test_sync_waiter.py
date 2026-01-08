@@ -15,10 +15,14 @@ async def test_waiter_resolves_on_callback() -> None:
     job_id = uuid.uuid4()
     await waiter.register(job_id)
 
-    result = SyncCallbackResult(job_id=job_id, status=JobStatus.SUCCESS, payload={"ok": True})
+    result = SyncCallbackResult(
+        job_id=job_id, status=JobStatus.SUCCESS, payload={"ok": True}
+    )
     await waiter.resolve(result)
 
-    observed = await waiter.wait_for_result(job_id, timeout_seconds=1.0, poll_interval_seconds=0.05)
+    observed = await waiter.wait_for_result(
+        job_id, timeout_seconds=1.0, poll_interval_seconds=0.05
+    )
     assert observed.status is JobStatus.SUCCESS
     assert observed.payload == {"ok": True}
 
@@ -30,7 +34,9 @@ async def test_waiter_times_out() -> None:
 
     await waiter.register(job_id)
     with pytest.raises(JobWaitTimeoutError):
-        await waiter.wait_for_result(job_id, timeout_seconds=0.05, poll_interval_seconds=0.01)
+        await waiter.wait_for_result(
+            job_id, timeout_seconds=0.05, poll_interval_seconds=0.01
+        )
 
 
 @pytest.mark.asyncio

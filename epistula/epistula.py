@@ -201,7 +201,10 @@ class EpistulaVerifier:
             return "Request is too stale"
 
         try:
-            from substrateinterface import Keypair  # Lazy import to avoid hard dep at import time
+            from substrateinterface import (
+                Keypair,
+            )  # Lazy import to avoid hard dep at import time
+
             keypair = Keypair(ss58_address=signed_by)
         except Exception as e:
             logger.error(f"Invalid Keypair for signed_by '{signed_by}': {e}")
@@ -260,7 +263,9 @@ class _SignerAdapter:
         raise TypeError("Unsupported signature return type from keypair.sign()")
 
 
-def _read_hotkey_file(wallets_dir: str, wallet_name: str, hotkey_name: str) -> Dict[str, str]:
+def _read_hotkey_file(
+    wallets_dir: str, wallet_name: str, hotkey_name: str
+) -> Dict[str, str]:
     """Read a Bittensor-style hotkey keyfile and return its JSON content.
 
     Accepts files created by `btcli` or our test helpers. The file typically
@@ -268,7 +273,12 @@ def _read_hotkey_file(wallets_dir: str, wallet_name: str, hotkey_name: str) -> D
     """
     import pathlib
 
-    p = pathlib.Path(wallets_dir).expanduser().resolve() / wallet_name / "hotkeys" / hotkey_name
+    p = (
+        pathlib.Path(wallets_dir).expanduser().resolve()
+        / wallet_name
+        / "hotkeys"
+        / hotkey_name
+    )
     if not p.exists():
         raise FileNotFoundError(f"Hotkey file not found: {p}")
     try:
@@ -296,7 +306,9 @@ def _read_hotkey_file_by_path(path: str) -> Dict[str, str]:
         raise RuntimeError(f"Failed to read hotkey file at {p}: {e}")
 
 
-def _create_keypair(secret_phrase: Optional[str], secret_seed: Optional[str]) -> "object":
+def _create_keypair(
+    secret_phrase: Optional[str], secret_seed: Optional[str]
+) -> "object":
     """Create a sr25519-compatible keypair from mnemonic or seed.
 
     Tries `substrateinterface.Keypair` first. If unavailable, attempts
@@ -309,10 +321,14 @@ def _create_keypair(secret_phrase: Optional[str], secret_seed: Optional[str]) ->
         from substrateinterface import Keypair, KeypairType  # type: ignore
 
         if secret_phrase:
-            return Keypair.create_from_mnemonic(secret_phrase, crypto_type=KeypairType.SR25519)
+            return Keypair.create_from_mnemonic(
+                secret_phrase, crypto_type=KeypairType.SR25519
+            )
         if secret_seed:
             seed = secret_seed[2:] if secret_seed.startswith("0x") else secret_seed
-            return Keypair.create_from_seed(seed_hex=seed, crypto_type=KeypairType.SR25519)
+            return Keypair.create_from_seed(
+                seed_hex=seed, crypto_type=KeypairType.SR25519
+            )
     except Exception as e:  # pragma: no cover - environment-dependent
         last_error = e
 
@@ -333,6 +349,40 @@ def _create_keypair(secret_phrase: Optional[str], secret_seed: Optional[str]) ->
     )
 
 
+def _normalize_seed_hex(seed: str) -> str:
+    """Validate and normalize a 32-byte hex seed."""
+    raw = (seed or "").strip().lower()
+    if raw.startswith("0x"):
+        raw = raw[2:]
+    if len(raw) != 64:
+        raise ValueError(
+            f"Seed must be 32 bytes (64 hex chars), got {len(raw)} characters"
+        )
+    try:
+        int(raw, 16)
+    except Exception as exc:
+        raise ValueError(f"Seed contains non-hex characters: {seed}") from exc
+    return f"0x{raw}"
+
+
+def _load_keypair_from_seed(seed: str) -> "_SignerAdapter":
+    """Build a signer adapter from a raw seed string."""
+    normalized = _normalize_seed_hex(seed)
+    key = _create_keypair(None, normalized)
+    return _SignerAdapter(key)
+
+
+def _load_keypair_from_seed_file(path: str) -> "_SignerAdapter":
+    """Build a signer adapter from a seed file path."""
+    import pathlib
+
+    p = pathlib.Path(path).expanduser().resolve()
+    if not p.exists():
+        raise FileNotFoundError(f"Seed file not found: {p}")
+    seed = p.read_text().strip()
+    return _load_keypair_from_seed(seed)
+
+
 def load_keypair_from_wallet(
     *,
     wallet_name: str,
@@ -344,7 +394,9 @@ def load_keypair_from_wallet(
     - Defaults to `wallets_dir=~/.bittensor/wallets`.
     - Returns an object with `.ss58_address` and `.sign(message)`.
     """
-    wallets_dir = wallets_dir or os.environ.get("BT_WALLETS_DIR", "~/.bittensor/wallets")
+    wallets_dir = wallets_dir or os.environ.get(
+        "BT_WALLETS_DIR", "~/.bittensor/wallets"
+    )
     payload = _read_hotkey_file(wallets_dir, wallet_name, hotkey_name)
 
     secret_phrase = payload.get("secretPhrase")
@@ -358,7 +410,9 @@ def load_keypair_from_wallet(
         if expected:
             actual = getattr(key, "ss58_address")
             if actual != expected:
-                logger.warning("Keypair ss58 mismatch: file=%s != derived=%s", expected, actual)
+                logger.warning(
+                    "Keypair ss58 mismatch: file=%s != derived=%s", expected, actual
+                )
     except Exception:
         pass
     return _SignerAdapter(key)
@@ -372,17 +426,71 @@ def load_keypair_from_env() -> Optional["object"]:
     - Hotkey name: `EPISTULA_HOTKEY_NAME`, `BT_HOTKEY_NAME`, `HOTKEY_NAME`
     - Wallets dir: `BT_WALLETS_DIR` (default: `~/.bittensor/wallets`)
     - Direct mnemonic: `EPISTULA_SIGNING_MNEMONIC`, `ORCHESTRATOR_SIGNING_MNEMONIC`
+    - Seed hex or files (in-memory wallet): `EPISTULA_*_SEED_HEX` or `EPISTULA_*_SEED_PATH`
     """
+    # Prefer explicit seed overrides to avoid filesystem wallet requirements.
+    seed_env_candidates = [
+        ("EPISTULA_SEED_HEX", os.environ.get("EPISTULA_SEED_HEX")),
+        ("EPISTULA_HOTKEY_SEED_HEX", os.environ.get("EPISTULA_HOTKEY_SEED_HEX")),
+        ("ORCHESTRATOR_SEED_HEX", os.environ.get("ORCHESTRATOR_SEED_HEX")),
+        (
+            "ORCHESTRATOR_HOTKEY_SEED_HEX",
+            os.environ.get("ORCHESTRATOR_HOTKEY_SEED_HEX"),
+        ),
+        ("EPISTULA_COLDKEY_SEED_HEX", os.environ.get("EPISTULA_COLDKEY_SEED_HEX")),
+        (
+            "ORCHESTRATOR_COLDKEY_SEED_HEX",
+            os.environ.get("ORCHESTRATOR_COLDKEY_SEED_HEX"),
+        ),
+    ]
+    for name, value in seed_env_candidates:
+        if not value:
+            continue
+        try:
+            signer = _load_keypair_from_seed(value)
+            logger.info(f"Loaded Epistula keypair from env seed: {name}")
+            return signer
+        except Exception as exc:
+            logger.error(f"Failed to load Epistula seed from {name}: {exc}")
+
+    seed_path_candidates = [
+        ("EPISTULA_SEED_PATH", os.environ.get("EPISTULA_SEED_PATH")),
+        ("EPISTULA_HOTKEY_SEED_PATH", os.environ.get("EPISTULA_HOTKEY_SEED_PATH")),
+        ("ORCHESTRATOR_SEED_PATH", os.environ.get("ORCHESTRATOR_SEED_PATH")),
+        (
+            "ORCHESTRATOR_HOTKEY_SEED_PATH",
+            os.environ.get("ORCHESTRATOR_HOTKEY_SEED_PATH"),
+        ),
+        ("EPISTULA_COLDKEY_SEED_PATH", os.environ.get("EPISTULA_COLDKEY_SEED_PATH")),
+        (
+            "ORCHESTRATOR_COLDKEY_SEED_PATH",
+            os.environ.get("ORCHESTRATOR_COLDKEY_SEED_PATH"),
+        ),
+    ]
+    for name, path in seed_path_candidates:
+        if not path:
+            continue
+        try:
+            signer = _load_keypair_from_seed_file(path)
+            logger.info(f"Loaded Epistula keypair from seed file: {path}")
+            return signer
+        except Exception as exc:
+            logger.error(f"Failed to load Epistula seed file {path}: {exc}")
+
     key_path = os.environ.get("EPISTULA_HOTKEY_PATH")
     if key_path:
         try:
             payload = _read_hotkey_file_by_path(key_path)
-            key = _create_keypair(payload.get("secretPhrase"), payload.get("secretSeed"))
+            key = _create_keypair(
+                payload.get("secretPhrase"), payload.get("secretSeed")
+            )
             return _SignerAdapter(key)
         except Exception as e:
             logger.error(f"Failed to load EPISTULA_HOTKEY_PATH: {e}")
 
-    mnemonic = os.environ.get("EPISTULA_SIGNING_MNEMONIC") or os.environ.get("ORCHESTRATOR_SIGNING_MNEMONIC")
+    mnemonic = os.environ.get("EPISTULA_SIGNING_MNEMONIC") or os.environ.get(
+        "ORCHESTRATOR_SIGNING_MNEMONIC"
+    )
     if mnemonic:
         key = _create_keypair(mnemonic, None)
         return _SignerAdapter(key)
@@ -410,6 +518,7 @@ def load_keypair_from_env() -> Optional["object"]:
 
     try:
         import pathlib
+
         base = pathlib.Path(wallets_dir).expanduser().resolve()
         candidates = sorted(base.glob("*/hotkeys/*"))
         for cand in candidates:
@@ -418,7 +527,9 @@ def load_keypair_from_env() -> Optional["object"]:
                 if not isinstance(payload, dict):
                     continue
                 if payload.get("secretPhrase") or payload.get("secretSeed"):
-                    key = _create_keypair(payload.get("secretPhrase"), payload.get("secretSeed"))
+                    key = _create_keypair(
+                        payload.get("secretPhrase"), payload.get("secretSeed")
+                    )
                     logger.warning(f"Loaded Epistula hotkey via auto-discovery: {cand}")
                     return _SignerAdapter(key)
             except Exception:

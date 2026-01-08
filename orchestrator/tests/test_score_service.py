@@ -15,7 +15,9 @@ class StubJobRelay(BaseJobRelayClient):
     def __init__(self, jobs_by_hotkey: dict[str, list[dict]]) -> None:
         self._jobs_by_hotkey = jobs_by_hotkey
 
-    async def list_jobs_for_hotkey(self, hotkey: str, since: datetime | None = None) -> list[dict]:
+    async def list_jobs_for_hotkey(
+        self, hotkey: str, since: datetime | None = None
+    ) -> list[dict]:
         jobs = list(self._jobs_by_hotkey.get(hotkey, []))
         if since is None:
             return jobs
@@ -25,7 +27,11 @@ class StubJobRelay(BaseJobRelayClient):
             completed = job.get("completed_at")
             event_time: datetime | None
             if isinstance(completed, datetime):
-                event_time = completed if completed.tzinfo else completed.replace(tzinfo=timezone.utc)
+                event_time = (
+                    completed
+                    if completed.tzinfo
+                    else completed.replace(tzinfo=timezone.utc)
+                )
             elif isinstance(completed, str):
                 try:
                     parsed = datetime.fromisoformat(completed.replace("Z", "+00:00"))
@@ -43,8 +49,9 @@ class StubJobRelay(BaseJobRelayClient):
 
 
 class FailingJobRelay(BaseJobRelayClient):
-
-    async def list_jobs_for_hotkey(self, hotkey: str, since: datetime | None = None) -> list[dict]:
+    async def list_jobs_for_hotkey(
+        self, hotkey: str, since: datetime | None = None
+    ) -> list[dict]:
         raise RuntimeError("boom")
 
 
@@ -164,3 +171,62 @@ async def test_build_scores_from_state_slashes_banned_hotkeys() -> None:
     assert payload.score.total_score == 0.0
     assert response.stats["jobs_considered"] == 0
     assert response.stats["fetch_failures"] == 0
+
+
+@pytest.mark.asyncio
+async def test_build_scores_from_state_slashes_on_failure_threshold() -> None:
+    now = datetime.now(timezone.utc)
+    hotkey = "hk-failure-slash"
+    miner = Miner(
+        uid=4,
+        network_address="https://miner4.example.com",
+        valid=True,
+        alpha_stake=250,
+        hotkey=hotkey,
+    )
+
+    jobs_by_hotkey = {
+        hotkey: [
+            {
+                "job_id": "job-success",
+                "job_type": JobType.FLUX_KONTEXT.value,
+                "status": "success",
+                "completed_at": (now - timedelta(hours=2)).isoformat(),
+                "execution_duration_ms": 900,
+            },
+            {
+                "job_id": "job-fail-1",
+                "job_type": JobType.FLUX_KONTEXT.value,
+                "status": "failed",
+                "completed_at": (now - timedelta(hours=1, minutes=30)).isoformat(),
+                "execution_duration_ms": 900,
+            },
+            {
+                "job_id": "job-fail-2",
+                "job_type": JobType.FLUX_KONTEXT.value,
+                "status": "failed",
+                "completed_at": (now - timedelta(hours=1)).isoformat(),
+                "execution_duration_ms": 900,
+            },
+            {
+                "job_id": "job-fail-3",
+                "job_type": JobType.FLUX_KONTEXT.value,
+                "status": "failed",
+                "completed_at": (now - timedelta(minutes=30)).isoformat(),
+                "execution_duration_ms": 900,
+            },
+        ]
+    }
+
+    relay = StubJobRelay(jobs_by_hotkey)
+    state = {hotkey: miner}
+
+    response = await build_scores_from_state(
+        state,
+        job_relay_client=relay,
+        failure_slash_threshold=3,
+    )
+
+    payload = response.scores[hotkey]
+    assert payload.status == "SLASHED"
+    assert payload.score.total_score == 0.0

@@ -57,6 +57,7 @@ def _json_dumps(data: Dict[str, Any]) -> str:
     try:
         return json.dumps(data, separators=(",", ":"), default=str)
     except Exception:
+
         def _fallback(o: Any) -> str:
             try:
                 return str(o)

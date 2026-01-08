@@ -130,7 +130,9 @@ async def _dispatch_callback(
     headers = {}
     if callback_secret:
         headers["X-Callback-Secret"] = callback_secret
-        logger.info(f"[Job {job_id}] Using callback secret: {callback_secret[:8]}...{callback_secret[-4:] if len(callback_secret) > 12 else ''}")
+        logger.info(
+            f"[Job {job_id}] Using callback secret: {callback_secret[:8]}...{callback_secret[-4:] if len(callback_secret) > 12 else ''}"
+        )
     else:
         logger.info(f"[Job {job_id}] No callback secret provided")
 
@@ -157,14 +159,20 @@ async def _dispatch_callback(
         content_type=_guess_media_type(image_path),
     )
 
-    logger.info(f"[Job {job_id}] Sending form data: job_id={job_id}, status=completed, image_size={len(image_bytes)} bytes")
+    logger.info(
+        f"[Job {job_id}] Sending form data: job_id={job_id}, status=completed, image_size={len(image_bytes)} bytes"
+    )
 
     timeout_config = aiohttp.ClientTimeout(total=timeout)
 
     try:
         async with aiohttp.ClientSession(timeout=timeout_config) as session:
-            logger.debug(f"[Job {job_id}] POST {callback_url} with headers: {list(headers.keys())}")
-            async with session.post(callback_url, data=form, headers=headers) as response:
+            logger.debug(
+                f"[Job {job_id}] POST {callback_url} with headers: {list(headers.keys())}"
+            )
+            async with session.post(
+                callback_url, data=form, headers=headers
+            ) as response:
                 response_text = await response.text()
                 result = {
                     "status": "delivered" if response.status < 400 else "error",
@@ -173,14 +181,18 @@ async def _dispatch_callback(
                     "attempted_at": attempt_iso,
                 }
                 if response.status < 400:
-                    logger.info(f"[Job {job_id}] ✓ Callback delivered successfully (HTTP {response.status})")
+                    logger.info(
+                        f"[Job {job_id}] ✓ Callback delivered successfully (HTTP {response.status})"
+                    )
                     logger.debug(f"[Job {job_id}] Response: {response_text[:200]}")
                 else:
                     logger.warning(
                         f"[Job {job_id}] ✗ Callback returned error status {response.status}"
                     )
                     logger.warning(f"[Job {job_id}] Callback URL was: {callback_url}")
-                    logger.warning(f"[Job {job_id}] Response body: {response_text[:500]}")
+                    logger.warning(
+                        f"[Job {job_id}] Response body: {response_text[:500]}"
+                    )
                 return result
     except Exception as exc:
         logger.error(f"[Job {job_id}] ✗ Callback delivery failed: {exc}")
@@ -230,26 +242,34 @@ async def submit_inference(request: InferenceRequest):
         )
 
     job_id = request.job_id or str(uuid7())
-    logger.info(f"[Job {job_id}] Received inference request (prompt: {request.prompt[:50] if request.prompt else 'None'}...)")
-    
+    logger.info(
+        f"[Job {job_id}] Received inference request (prompt: {request.prompt[:50] if request.prompt else 'None'}...)"
+    )
+
     # Apply callback URL override if configured
     actual_callback_url = request.callback_url
     if OVERRIDE_CALLBACK_URL and request.callback_url:
-        logger.warning(f"[Job {job_id}] ⚠️  OVERRIDING callback URL from {request.callback_url} to {OVERRIDE_CALLBACK_URL}")
+        logger.warning(
+            f"[Job {job_id}] ⚠️  OVERRIDING callback URL from {request.callback_url} to {OVERRIDE_CALLBACK_URL}"
+        )
         actual_callback_url = OVERRIDE_CALLBACK_URL
     elif OVERRIDE_CALLBACK_URL and not request.callback_url:
-        logger.warning(f"[Job {job_id}] ⚠️  No callback URL provided but override is set - using {OVERRIDE_CALLBACK_URL}")
+        logger.warning(
+            f"[Job {job_id}] ⚠️  No callback URL provided but override is set - using {OVERRIDE_CALLBACK_URL}"
+        )
         actual_callback_url = OVERRIDE_CALLBACK_URL
-    
+
     if actual_callback_url:
         logger.info(f"[Job {job_id}] Callback URL: {actual_callback_url}")
         if request.callback_secret:
-            logger.info(f"[Job {job_id}] Callback secret provided: {request.callback_secret[:8]}...{request.callback_secret[-4:] if len(request.callback_secret) > 12 else ''}")
+            logger.info(
+                f"[Job {job_id}] Callback secret provided: {request.callback_secret[:8]}...{request.callback_secret[-4:] if len(request.callback_secret) > 12 else ''}"
+            )
         else:
             logger.info(f"[Job {job_id}] No callback secret provided")
     else:
         logger.info(f"[Job {job_id}] No callback URL provided")
-    
+
     _jobs[job_id] = {
         "prompt": request.prompt,
         "callback_url": request.callback_url,
@@ -300,17 +320,16 @@ async def submit_sync_inference(request: InferenceRequest):
         )
 
     job_id = request.job_id or str(uuid7())
-    logger.info(f"[Sync Job {job_id}] Received sync inference request (prompt: {request.prompt[:50] if request.prompt else 'None'}...)")
-    
+    logger.info(
+        f"[Sync Job {job_id}] Received sync inference request (prompt: {request.prompt[:50] if request.prompt else 'None'}...)"
+    )
+
     # Return the image directly as a file response
     return FileResponse(
         path=IMAGE_PATH,
         media_type=IMAGE_MEDIA_TYPE,
         filename=f"{job_id}{IMAGE_PATH.suffix}",
-        headers={
-            "X-Job-ID": job_id,
-            "X-Status": "completed"
-        }
+        headers={"X-Job-ID": job_id, "X-Status": "completed"},
     )
 
 
@@ -324,26 +343,34 @@ async def submit_edit(request: EditRequest):
         )
 
     job_id = request.job_id or f"edit-{str(uuid7())}"
-    logger.info(f"[Edit Job {job_id}] Received edit request (prompt: {request.prompt[:50] if request.prompt else 'None'}..., seed: {request.seed})")
-    
+    logger.info(
+        f"[Edit Job {job_id}] Received edit request (prompt: {request.prompt[:50] if request.prompt else 'None'}..., seed: {request.seed})"
+    )
+
     # Apply callback URL override if configured
     actual_callback_url = request.callback_url
     if OVERRIDE_CALLBACK_URL and request.callback_url:
-        logger.warning(f"[Edit Job {job_id}] ⚠️  OVERRIDING callback URL from {request.callback_url} to {OVERRIDE_CALLBACK_URL}")
+        logger.warning(
+            f"[Edit Job {job_id}] ⚠️  OVERRIDING callback URL from {request.callback_url} to {OVERRIDE_CALLBACK_URL}"
+        )
         actual_callback_url = OVERRIDE_CALLBACK_URL
     elif OVERRIDE_CALLBACK_URL and not request.callback_url:
-        logger.warning(f"[Edit Job {job_id}] ⚠️  No callback URL provided but override is set - using {OVERRIDE_CALLBACK_URL}")
+        logger.warning(
+            f"[Edit Job {job_id}] ⚠️  No callback URL provided but override is set - using {OVERRIDE_CALLBACK_URL}"
+        )
         actual_callback_url = OVERRIDE_CALLBACK_URL
-    
+
     if actual_callback_url:
         logger.info(f"[Edit Job {job_id}] Callback URL: {actual_callback_url}")
         if request.callback_secret:
-            logger.info(f"[Edit Job {job_id}] Callback secret provided: {request.callback_secret[:8]}...{request.callback_secret[-4:] if len(request.callback_secret) > 12 else ''}")
+            logger.info(
+                f"[Edit Job {job_id}] Callback secret provided: {request.callback_secret[:8]}...{request.callback_secret[-4:] if len(request.callback_secret) > 12 else ''}"
+            )
         else:
             logger.info(f"[Edit Job {job_id}] No callback secret provided")
     else:
         logger.info(f"[Edit Job {job_id}] No callback URL provided")
-    
+
     _edit_jobs[job_id] = {
         "prompt": request.prompt,
         "seed": request.seed,
@@ -395,8 +422,10 @@ async def submit_sync_edit(request: EditRequest):
         )
 
     job_id = request.job_id or f"edit-{str(uuid7())}"
-    logger.info(f"[Sync Edit Job {job_id}] Received sync edit request (prompt: {request.prompt[:50] if request.prompt else 'None'}..., seed: {request.seed})")
-    
+    logger.info(
+        f"[Sync Edit Job {job_id}] Received sync edit request (prompt: {request.prompt[:50] if request.prompt else 'None'}..., seed: {request.seed})"
+    )
+
     # Return the image directly as a file response
     return FileResponse(
         path=IMAGE_PATH,
@@ -405,8 +434,8 @@ async def submit_sync_edit(request: EditRequest):
         headers={
             "X-Job-ID": job_id,
             "X-Status": "completed",
-            "X-Seed": str(request.seed)
-        }
+            "X-Seed": str(request.seed),
+        },
     )
 
 

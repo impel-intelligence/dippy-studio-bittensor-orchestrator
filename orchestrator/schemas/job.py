@@ -84,7 +84,9 @@ class InferenceJob(_DateTimeModel):
     result_image_url: Optional[str] = None
     result_image_sha256: Optional[str] = None
 
-    creation_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    creation_timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
     last_updated_at: Optional[datetime] = None
     miner_received_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -93,22 +95,29 @@ class InferenceJob(_DateTimeModel):
 
     status: JobStatus = Field(default=JobStatus.pending)
     audit_status: AuditStatus = Field(default=AuditStatus.not_audited)
-    verification_status: VerificationStatus = Field(default=VerificationStatus.nonverified)
+    verification_status: VerificationStatus = Field(
+        default=VerificationStatus.nonverified
+    )
 
     is_audit_job: bool = False
     audit_target_job_id: Optional[UUID] = None
 
 
 class JobRecord(InferenceJob):
-
     model_config = ConfigDict(populate_by_name=True)
 
     miner_hotkey: str = Field(serialization_alias="hotkey")
     payload: Dict[str, Any] = Field(serialization_alias="request_payload")
     creation_timestamp: datetime = Field(serialization_alias="created_at")
-    completed_at: Optional[datetime] = Field(default=None, serialization_alias="completed_at")
-    last_updated_at: Optional[datetime] = Field(default=None, serialization_alias="last_updated_at")
-    miner_received_at: Optional[datetime] = Field(default=None, serialization_alias="miner_received_at")
+    completed_at: Optional[datetime] = Field(
+        default=None, serialization_alias="completed_at"
+    )
+    last_updated_at: Optional[datetime] = Field(
+        default=None, serialization_alias="last_updated_at"
+    )
+    miner_received_at: Optional[datetime] = Field(
+        default=None, serialization_alias="miner_received_at"
+    )
 
     prompt_seed: Optional[int] = None
     callback_secret: Optional[str] = None
@@ -116,7 +125,9 @@ class JobRecord(InferenceJob):
     dispatched_at: Optional[datetime] = None
     failure_reason: Optional[str] = None
     response_payload: Optional[Dict[str, Any]] = None
-    response_timestamp: Optional[datetime] = Field(default=None, serialization_alias="response_timestamp")
+    response_timestamp: Optional[datetime] = Field(
+        default=None, serialization_alias="response_timestamp"
+    )
     audit_id: Optional[UUID] = None
 
     verification_status: VerificationStatus = VerificationStatus.nonverified
@@ -137,26 +148,33 @@ class JobRecord(InferenceJob):
             completed_at = response_timestamp
             last_updated_at = response_timestamp
             if isinstance(response_payload, dict):
-                candidate_url = response_payload.get("image_url") or response_payload.get("image_uri")
+                candidate_url = response_payload.get(
+                    "image_url"
+                ) or response_payload.get("image_uri")
                 if isinstance(candidate_url, str) and candidate_url.strip():
                     result_image_url = candidate_url
                 candidate_hash = response_payload.get("image_sha256")
                 if isinstance(candidate_hash, str) and candidate_hash.strip():
                     result_image_sha256 = candidate_hash
         else:
-            last_updated_at = _ensure_datetime(job.dispatched_at or job.prepared_at or job.job_request.timestamp)
+            last_updated_at = _ensure_datetime(
+                job.dispatched_at or job.prepared_at or job.job_request.timestamp
+            )
 
         prepared_at = _ensure_datetime(job.prepared_at)
         dispatched_at = _ensure_datetime(job.dispatched_at)
 
         return cls(
             job_id=job.job_id,
-            job_type=getattr(job.job_request.job_type, "value", job.job_request.job_type),
+            job_type=getattr(
+                job.job_request.job_type, "value", job.job_request.job_type
+            ),
             miner_hotkey=job.hotkey,
             payload=request_payload,
             result_image_url=result_image_url,
             result_image_sha256=result_image_sha256,
-            creation_timestamp=_ensure_datetime(job.job_request.timestamp) or datetime.now(timezone.utc),
+            creation_timestamp=_ensure_datetime(job.job_request.timestamp)
+            or datetime.now(timezone.utc),
             last_updated_at=last_updated_at,
             miner_received_at=dispatched_at,
             completed_at=completed_at,
@@ -191,7 +209,9 @@ class CompletedJobSummary(BaseModel):
 
     @classmethod
     def from_job_record(cls, record: JobRecord) -> "CompletedJobSummary":
-        completed = record.completed_at or record.last_updated_at or record.creation_timestamp
+        completed = (
+            record.completed_at or record.last_updated_at or record.creation_timestamp
+        )
         sanitized_payload = _sanitize_response_payload(record.response_payload)
         return cls(
             job_id=record.job_id,
@@ -230,7 +250,9 @@ def _to_audit_status(status: Any) -> AuditStatus:
     return AuditStatus(getattr(status, "value", status))
 
 
-def _sanitize_response_payload(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _sanitize_response_payload(
+    payload: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
     if payload is None:
         return None
     if not isinstance(payload, dict):

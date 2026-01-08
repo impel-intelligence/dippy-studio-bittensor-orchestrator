@@ -26,10 +26,13 @@ from orchestrator.services.job_service import JobService
 from orchestrator.services.miner_health_service import MinerHealthService
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.services.miner_selection_service import MinerSelectionService
-from orchestrator.repositories import AuditFailureRepository, MinerRepository
+from orchestrator.repositories import AuditRepository, MinerRepository
 from orchestrator.services.score_service import ScoreService
 from orchestrator.domain.miner import Miner
-from orchestrator.services.sync_waiter import RedisSyncCallbackWaiter, SyncCallbackWaiter
+from orchestrator.services.sync_waiter import (
+    RedisSyncCallbackWaiter,
+    SyncCallbackWaiter,
+)
 from orchestrator.services.webhook_dispatcher import WebhookDispatcher
 
 _OTEL_CONFIGURED = False
@@ -47,15 +50,25 @@ def _configure_opentelemetry(app: FastAPI) -> None:
     global _OTEL_CONFIGURED
     if _OTEL_CONFIGURED:
         return
-    if os.getenv("OTEL_SDK_DISABLED", "").strip().lower() in {"1", "true", "yes", "y", "on"}:
+    if os.getenv("OTEL_SDK_DISABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }:
         logger.info("OpenTelemetry disabled via OTEL_SDK_DISABLED")
         return
     try:
         from opentelemetry import metrics, trace
         from opentelemetry._logs import set_logger_provider
         from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
-        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+            OTLPMetricExporter,
+        )
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         from opentelemetry.instrumentation.logging import LoggingInstrumentor
         from opentelemetry.instrumentation.requests import RequestsInstrumentor
@@ -70,10 +83,20 @@ def _configure_opentelemetry(app: FastAPI) -> None:
         logger.warning("OpenTelemetry not configured (missing packages): %s", exc)
         return
 
-    base_otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318").rstrip("/")
-    traces_endpoint = os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or f"{base_otlp_endpoint}/v1/traces"
-    metrics_endpoint = os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") or f"{base_otlp_endpoint}/v1/metrics"
-    logs_endpoint = os.getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") or f"{base_otlp_endpoint}/v1/logs"
+    base_otlp_endpoint = os.getenv(
+        "OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318"
+    ).rstrip("/")
+    traces_endpoint = (
+        os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        or f"{base_otlp_endpoint}/v1/traces"
+    )
+    metrics_endpoint = (
+        os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+        or f"{base_otlp_endpoint}/v1/metrics"
+    )
+    logs_endpoint = (
+        os.getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") or f"{base_otlp_endpoint}/v1/logs"
+    )
 
     # Parse OTEL_RESOURCE_ATTRIBUTES for additional resource attributes
     resource_attrs = {"service.name": os.getenv("OTEL_SERVICE_NAME", "orchestrator")}
@@ -88,7 +111,9 @@ def _configure_opentelemetry(app: FastAPI) -> None:
 
     # 1. Configure Tracing
     tracer_provider = TracerProvider(resource=resource)
-    tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=traces_endpoint)))
+    tracer_provider.add_span_processor(
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=traces_endpoint))
+    )
     trace.set_tracer_provider(tracer_provider)
 
     # 2. Configure Metrics
@@ -113,12 +138,12 @@ def _configure_opentelemetry(app: FastAPI) -> None:
 
     # 5. Create OTEL handler that exports logs with trace context as attributes
     # The LoggingHandler automatically extracts trace context from the current span
-    otel_logging_handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
+    otel_logging_handler = LoggingHandler(
+        level=logging.NOTSET, logger_provider=logger_provider
+    )
 
     # 6. Create console handler with trace context in format for debugging
-    console_format = (
-        "%(asctime)s %(levelname)s [%(name)s] [trace_id=%(otelTraceID)s span_id=%(otelSpanID)s] - %(message)s"
-    )
+    console_format = "%(asctime)s %(levelname)s [%(name)s] [trace_id=%(otelTraceID)s span_id=%(otelSpanID)s] - %(message)s"
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter(console_format))
 
@@ -154,6 +179,7 @@ def _configure_opentelemetry(app: FastAPI) -> None:
         resource_attrs,
     )
 
+
 __all__ = ["orchestrator"]
 
 DEFAULT_LOCAL_STUB_MINER_URL = "http://stub-miner:8765"
@@ -183,7 +209,9 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
 
         resolved_db_url = self.config.database.url or os.getenv("DATABASE_URL")
         if not resolved_db_url:
-            resolved_db_url = "postgresql://orchestrator:orchestrator@postgres:5432/orchestrator"
+            raise RuntimeError(
+                "Database URL must be configured via config file or DATABASE_URL"
+            )
 
         min_conn = max(1, self.config.database.min_connections)
         max_conn = max(min_conn, self.config.database.max_connections)
@@ -197,7 +225,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
 
         self.epistula_client = EpistulaClient()
         self.miner_repository = MinerRepository(self.database_service)
-        self.audit_failure_repository = AuditFailureRepository(self.database_service)
+        self.audit_repository = AuditRepository(self.database_service)
         self.miner_health_service = MinerHealthService(
             repository=self.miner_repository,
             epistula_client=self.epistula_client,
@@ -259,15 +287,24 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
 
         jobrelay_cfg = self.config.jobrelay
         if not jobrelay_cfg.is_enabled():
-            raise RuntimeError("Job relay integration must be enabled for the orchestrator")
+            raise RuntimeError(
+                "Job relay integration must be enabled for the orchestrator"
+            )
 
-        if not jobrelay_cfg.base_url:
+        jobrelay_base_url = os.getenv("JOBRELAY_BASE_URL", jobrelay_cfg.base_url)
+        jobrelay_auth_token = os.getenv("JOBRELAY_AUTH_TOKEN", jobrelay_cfg.auth_token)
+
+        if not jobrelay_base_url:
             raise RuntimeError("Job relay base URL must be configured")
+
+        # Reflect any env overrides back into config for logging/diagnostics.
+        self.config.jobrelay.base_url = jobrelay_base_url
+        self.config.jobrelay.auth_token = jobrelay_auth_token
 
         try:
             jobrelay_settings = JobRelaySettings(
-                base_url=jobrelay_cfg.base_url,
-                auth_token=jobrelay_cfg.auth_token,
+                base_url=jobrelay_base_url,
+                auth_token=jobrelay_auth_token,
                 timeout_seconds=jobrelay_cfg.timeout_seconds,
             )
             self.job_relay_client = JobRelayHttpClient(jobrelay_settings)
@@ -297,6 +334,8 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             ema_half_life_seconds=self.config.scores.ema_half_life_seconds,
             failure_penalty_weight=self.config.scores.failure_penalty_weight,
             lookback_days=self.config.scores.lookback_days,
+            pending_timeout_seconds=self.config.scores.pending_timeout_seconds,
+            failure_slash_threshold=self.config.scores.failure_slash_threshold,
         )
         self.server_context.score_service = self.score_service
 
@@ -330,7 +369,9 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
                 backend="redis",
                 error=str(exc),
             )
-            raise RuntimeError("Redis support is required for sync callback waiter") from exc
+            raise RuntimeError(
+                "Redis support is required for sync callback waiter"
+            ) from exc
 
         try:
             redis_client = redis_async.from_url(redis_url)
@@ -355,7 +396,9 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
                 redis_url=redis_url,
                 error=str(exc),
             )
-            raise RuntimeError("Failed to initialize Redis sync callback waiter") from exc
+            raise RuntimeError(
+                "Failed to initialize Redis sync callback waiter"
+            ) from exc
 
     @staticmethod
     def _coerce_int(candidate: str | None, default: int) -> int:
@@ -367,11 +410,20 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             return default
 
     def _maybe_seed_local_stub_miner(self) -> None:
-        enabled = os.getenv("ENABLE_LOCAL_STUB_MINER", "false").lower() in {"1", "true", "yes", "on"}
+        enabled = os.getenv("ENABLE_LOCAL_STUB_MINER", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         if not enabled:
             return
 
-        base_url = os.getenv("LOCAL_STUB_MINER_URL", DEFAULT_LOCAL_STUB_MINER_URL).strip().rstrip("/")
+        base_url = (
+            os.getenv("LOCAL_STUB_MINER_URL", DEFAULT_LOCAL_STUB_MINER_URL)
+            .strip()
+            .rstrip("/")
+        )
         hotkey = os.getenv("LOCAL_STUB_MINER_HOTKEY", DEFAULT_LOCAL_STUB_HOTKEY).strip()
         uid = self._coerce_int(os.getenv("LOCAL_STUB_MINER_UID"), 4242)
         alpha_stake = self._coerce_int(os.getenv("LOCAL_STUB_MINER_ALPHA"), 100_000)
@@ -419,7 +471,7 @@ class Orchestrator:  # noqa: D101 – thin wrapper around FastAPI app
             database_service=self.database_service,
             server_context=self.server_context,
             callback_service=self.callback_service,
-            audit_failure_repository=self.audit_failure_repository,
+            audit_repository=self.audit_repository,
             job_service=self.job_service,
             job_relay_client=self.job_relay_client,
             config=self.config,
@@ -493,7 +545,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--live-reload",
         action="store_true",
-        help="Enable hot reload for development (watches for file changes)"
+        help="Enable hot reload for development (watches for file changes)",
     )
     parser.add_argument(
         "--port",
@@ -501,9 +553,9 @@ if __name__ == "__main__":
         default=default_port,
         help="Port to bind the server (default comes from ORCHESTRATOR_PORT or 42069)",
     )
-    
+
     args = parser.parse_args()
-    
+
     uvicorn.run(
         "orchestrator.server:create_app",
         host="0.0.0.0",

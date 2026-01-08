@@ -15,7 +15,16 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "target",
-        choices=("metagraph", "score", "audit", "audit-seed", "audit-check", "audit-broadcast", "seed-requests", "all"),
+        choices=(
+            "metagraph",
+            "score",
+            "audit",
+            "audit-seed",
+            "audit-check",
+            "audit-broadcast",
+            "seed-requests",
+            "all",
+        ),
         help=(
             "Which worker to execute (use 'audit-seed'/'audit-check' for split audit workflows, "
             "'audit-broadcast' to send a reference job to all miners, "

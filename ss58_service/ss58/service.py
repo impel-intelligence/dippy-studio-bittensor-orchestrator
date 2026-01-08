@@ -34,6 +34,8 @@ class SS58Service:
         self.pinata = pinata
         self.head_store = head_store
         self.repository = repository
+        self._cached_head: str | None = None
+        self._cached_addresses: list[str] | None = None
 
     def _sign_data(self, data: EntryData) -> str:
         return self.signer.sign(canonical_data_bytes(data))
@@ -42,7 +44,9 @@ class SS58Service:
         payload: Dict[str, Any] = entry.model_dump()
         return self.pinata.pin_json(payload, name=name)
 
-    def _build_entry(self, addresses: List[str], prev: Optional[str]) -> Tuple[Entry, str, HeadState]:
+    def _build_entry(
+        self, addresses: List[str], prev: Optional[str]
+    ) -> Tuple[Entry, str, HeadState]:
         now = int(time.time())
         data = EntryData(addresses=addresses, timestamp=now, prev=prev)
         signature = self._sign_data(data)
@@ -50,12 +54,18 @@ class SS58Service:
         name = f"ss58-entry-{now}"
         cid = self._pin_entry(entry, name=name)
         head_state = self.head_store.write(cid)
-        LOGGER.info("Pinned entry to IPFS (cid=%s prev=%s addresses=%d)", cid, prev, len(addresses))
+        LOGGER.info(
+            "Pinned entry to IPFS (cid=%s prev=%s addresses=%d)",
+            cid,
+            prev,
+            len(addresses),
+        )
         return entry, cid, head_state
 
     def create_genesis(self) -> AddResponse:
         """Create a blank genesis entry (no addresses, prev=None)."""
         entry, cid, head_state = self._build_entry([], prev=None)
+        self._cache_addresses(head_state.cid, [])
         return AddResponse(
             cid=cid,
             prev=None,
@@ -70,7 +80,7 @@ class SS58Service:
         prev = head_state.cid if head_state else None
 
         # Collect existing addresses to avoid duplicates
-        _, existing = self.repository.collect_addresses(prev)
+        ordered, existing = self.repository.collect_addresses(prev)
         new_addrs = [a for a in addresses if a not in existing]
         if not new_addrs:
             LOGGER.info("No new addresses to append; skipping pin")
@@ -83,6 +93,8 @@ class SS58Service:
             )
 
         entry, cid, updated_head = self._build_entry(new_addrs, prev=prev)
+        # Cache oldest->newest order (mirror dump_addresses behavior).
+        self._cache_addresses(updated_head.cid, list(reversed(new_addrs + ordered)))
         return AddResponse(
             cid=cid,
             prev=prev,
@@ -96,6 +108,21 @@ class SS58Service:
 
     def dump_addresses(self) -> List[str]:
         head_state = self.head_store.read()
-        ordered, _ = self.repository.collect_addresses(head_state.cid if head_state else None)
+        if not head_state:
+            self._cache_addresses(None, [])
+            return []
+
+        head_cid = head_state.cid
+        if self._cached_head == head_cid and self._cached_addresses is not None:
+            return self._cached_addresses
+
+        ordered, _ = self.repository.collect_addresses(head_cid)
         # Return oldest->newest for readability
-        return list(reversed(ordered))
+        addresses = list(reversed(ordered))
+        self._cache_addresses(head_cid, addresses)
+        return addresses
+
+    def _cache_addresses(self, head_cid: str | None, addresses: list[str]) -> None:
+        """Memoize addresses for the current head to avoid repeated gateway fetches."""
+        self._cached_head = head_cid
+        self._cached_addresses = addresses

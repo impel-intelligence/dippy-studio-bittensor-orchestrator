@@ -21,19 +21,26 @@ class EntryRepository:
         *,
         gateway_base: str = "https://gateway.pinata.cloud/ipfs",
         timeout_seconds: int = 20,
+        gateway_token: str | None = None,
         verify_key_hex: str | None = None,
     ) -> None:
         self.gateway_base = gateway_base.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.gateway_token = gateway_token.strip() if gateway_token else None
         self.verify_key_hex = verify_key_hex
 
     def fetch(self, cid: str) -> Entry:
         url = f"{self.gateway_base}/{cid}"
-        resp = requests.get(url, timeout=self.timeout_seconds)
+        headers = {}
+        if self.gateway_token:
+            headers["x-pinata-gateway-token"] = self.gateway_token
+        resp = requests.get(url, timeout=self.timeout_seconds, headers=headers)
         try:
             resp.raise_for_status()
         except Exception:
-            LOGGER.error("Failed to fetch entry from gateway (cid=%s): %s", cid, resp.text[:200])
+            LOGGER.error(
+                "Failed to fetch entry from gateway (cid=%s): %s", cid, resp.text[:200]
+            )
             raise
         data = resp.json()
         return Entry.model_validate(data)

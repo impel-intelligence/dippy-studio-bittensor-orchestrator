@@ -34,6 +34,7 @@ def _get_meter() -> "Meter | None":
 
     try:
         from opentelemetry import metrics
+
         _meter = metrics.get_meter("orchestrator.jobs", version="1.0.0")
         return _meter
     except Exception as e:
@@ -110,10 +111,13 @@ def record_job_created(job_type: str, miner_hotkey: str) -> None:
         return
 
     try:
-        _jobs_created.add(1, {
-            "job_type": job_type,
-            "miner_hotkey": miner_hotkey,
-        })
+        _jobs_created.add(
+            1,
+            {
+                "job_type": job_type,
+                "miner_hotkey": miner_hotkey,
+            },
+        )
     except Exception as e:
         logger.debug("Failed to record job_created metric: %s", e)
 
@@ -152,11 +156,14 @@ def record_job_failed(
         return
 
     try:
-        _jobs_failed.add(1, {
-            "job_type": job_type,
-            "miner_hotkey": miner_hotkey,
-            "failure_reason": failure_reason or "unknown",
-        })
+        _jobs_failed.add(
+            1,
+            {
+                "job_type": job_type,
+                "miner_hotkey": miner_hotkey,
+                "failure_reason": failure_reason or "unknown",
+            },
+        )
     except Exception as e:
         logger.debug("Failed to record job_failed metric: %s", e)
 
@@ -172,16 +179,21 @@ def record_dispatch_latency(job_type: str, latency_ms: float) -> None:
         logger.debug("Failed to record dispatch_latency metric: %s", e)
 
 
-def record_callback_processing_time(job_type: str, duration_ms: float, status: str) -> None:
+def record_callback_processing_time(
+    job_type: str, duration_ms: float, status: str
+) -> None:
     """Record the time to process a callback."""
     if not _ensure_instruments() or _callback_processing_time is None:
         return
 
     try:
-        _callback_processing_time.record(duration_ms, {
-            "job_type": job_type,
-            "status": status,
-        })
+        _callback_processing_time.record(
+            duration_ms,
+            {
+                "job_type": job_type,
+                "status": status,
+            },
+        )
     except Exception as e:
         logger.debug("Failed to record callback_processing_time metric: %s", e)
 

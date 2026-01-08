@@ -15,7 +15,9 @@ from orchestrator.services.exceptions import CallbackValidationError
 
 
 class _FakeUploadFile:
-    def __init__(self, data: bytes, filename: str = "image.png", content_type: str = "image/png") -> None:
+    def __init__(
+        self, data: bytes, filename: str = "image.png", content_type: str = "image/png"
+    ) -> None:
         self._data = data
         self.filename = filename
         self.content_type = content_type
@@ -116,7 +118,9 @@ class _FakeJobService:
 
 
 @pytest.mark.asyncio
-async def test_process_callback_appends_image_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_process_callback_appends_image_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     uploader = _StubUploader("gs://bucket/image.png")
     service = CallbackService(uploader=uploader)
     expected_hash = "deadbeef"
@@ -153,14 +157,16 @@ async def test_process_callback_appends_image_hash(monkeypatch: pytest.MonkeyPat
 async def test_process_callback_forwards_to_webhook_when_present() -> None:
     dispatcher = _StubWebhookDispatcher()
     uploader = _StubUploader(
-        "https://storage.googleapis.com/dippy_studio_public/callbacks/image.png"
+        "https://storage.googleapis.com/example-bucket/callbacks/image.png"
     )
     service = CallbackService(uploader=uploader, webhook_dispatcher=dispatcher)
     job = _FakeJob(payload={"webhook_url": "https://example.com/webhook"})
     job_service = _FakeJobService(job=job)
     job_id_str = str(job_service.job.job_id)
 
-    image = _FakeUploadFile(b"content-bytes", filename="image.png", content_type="image/png")
+    image = _FakeUploadFile(
+        b"content-bytes", filename="image.png", content_type="image/png"
+    )
 
     status, _ = await service.process_callback(
         job_service=job_service,
@@ -174,14 +180,22 @@ async def test_process_callback_forwards_to_webhook_when_present() -> None:
     )
 
     assert status == "success"
-    assert dispatcher.calls and dispatcher.calls[-1]["webhook_url"] == "https://example.com/webhook"
-    assert dispatcher.calls[-1]["image_url"] == "https://media.dippy-bittensor.studio/callbacks/image.png"
+    assert (
+        dispatcher.calls
+        and dispatcher.calls[-1]["webhook_url"] == "https://example.com/webhook"
+    )
+    assert (
+        dispatcher.calls[-1]["image_url"]
+        == "https://media.example.com/callbacks/image.png"
+    )
     assert job_service.updated_payload is not None
     assert job_service.updated_payload["callback_metadata"]["webhook_forwarded"] is True
 
 
 @pytest.mark.asyncio
-async def test_process_callback_marks_webhook_forward_false_when_missing_dispatcher() -> None:
+async def test_process_callback_marks_webhook_forward_false_when_missing_dispatcher() -> (
+    None
+):
     service = CallbackService(webhook_dispatcher=None)
     job = _FakeJob(payload={"webhook_url": "https://example.com/webhook"})
     job_service = _FakeJobService(job=job)
@@ -200,7 +214,9 @@ async def test_process_callback_marks_webhook_forward_false_when_missing_dispatc
 
     assert status == "success"
     assert job_service.updated_payload is not None
-    assert job_service.updated_payload["callback_metadata"]["webhook_forwarded"] is False
+    assert (
+        job_service.updated_payload["callback_metadata"]["webhook_forwarded"] is False
+    )
 
 
 class _MockResponse:
@@ -232,7 +248,9 @@ def _mock_async_client(response: _MockResponse, recorder: list[str]):
 
 
 @pytest.mark.asyncio
-async def test_hash_remote_image_fetches_and_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_hash_remote_image_fetches_and_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = CallbackService()
     recorder: list[str] = []
     payload = b"hello-world"
@@ -243,7 +261,9 @@ async def test_hash_remote_image_fetches_and_hashes(monkeypatch: pytest.MonkeyPa
         _mock_async_client(response, recorder),
     )
 
-    digest = await service._hash_remote_image(job_id="job-2", image_uri="gs://bucket/path/file.png")
+    digest = await service._hash_remote_image(
+        job_id="job-2", image_uri="gs://bucket/path/file.png"
+    )
 
     assert recorder == ["https://storage.googleapis.com/bucket/path/file.png"]
     assert digest == hashlib.sha256(payload).hexdigest()
@@ -255,7 +275,9 @@ async def test_process_callback_enforces_flux_kontext_runtime_minimum() -> None:
     job_service = _FakeJobService()
     job_service.job.job_request.job_type = "img-h100_pcie"
     received_at = datetime.now(timezone.utc)
-    job_service.job.job_request.timestamp = (received_at - timedelta(seconds=2)).timestamp()
+    job_service.job.job_request.timestamp = (
+        received_at - timedelta(seconds=2)
+    ).timestamp()
     job_id_str = str(job_service.job.job_id)
 
     with pytest.raises(CallbackValidationError):
@@ -280,7 +302,9 @@ async def test_process_callback_allows_flux_kontext_runtime_after_threshold() ->
     job_service = _FakeJobService()
     job_service.job.job_request.job_type = "img-h100_pcie"
     received_at = datetime.now(timezone.utc)
-    job_service.job.job_request.timestamp = (received_at - timedelta(seconds=20)).timestamp()
+    job_service.job.job_request.timestamp = (
+        received_at - timedelta(seconds=20)
+    ).timestamp()
     job_id_str = str(job_service.job.job_id)
 
     status, _ = await service.process_callback(
@@ -304,7 +328,9 @@ async def test_process_callback_marks_flux_kontext_latency_timeout_failed() -> N
     job_service = _FakeJobService()
     job_service.job.job_request.job_type = "img-h100_pcie"
     received_at = datetime.now(timezone.utc)
-    job_service.job.job_request.timestamp = (received_at - timedelta(seconds=25)).timestamp()
+    job_service.job.job_request.timestamp = (
+        received_at - timedelta(seconds=25)
+    ).timestamp()
     job_service.job.dispatched_at = (received_at - timedelta(seconds=16)).timestamp()
     job_id_str = str(job_service.job.job_id)
 
@@ -330,7 +356,9 @@ async def test_process_callback_allows_flux_kontext_latency_within_threshold() -
     job_service = _FakeJobService()
     job_service.job.job_request.job_type = "img-h100_pcie"
     received_at = datetime.now(timezone.utc)
-    job_service.job.job_request.timestamp = (received_at - timedelta(seconds=20)).timestamp()
+    job_service.job.job_request.timestamp = (
+        received_at - timedelta(seconds=20)
+    ).timestamp()
     job_service.job.dispatched_at = (received_at - timedelta(seconds=10)).timestamp()
     job_id_str = str(job_service.job.job_id)
 
@@ -350,13 +378,17 @@ async def test_process_callback_allows_flux_kontext_latency_within_threshold() -
 
 
 @pytest.mark.asyncio
-async def test_process_callback_skips_validations_for_audit_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_process_callback_skips_validations_for_audit_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = CallbackService()
     job_service = _FakeJobService()
     job_service.job.is_audit_job = True
     job_service.job.job_request.job_type = "img-h100_pcie"
     received_at = datetime.now(timezone.utc)
-    job_service.job.job_request.timestamp = (received_at - timedelta(seconds=2)).timestamp()
+    job_service.job.job_request.timestamp = (
+        received_at - timedelta(seconds=2)
+    ).timestamp()
     job_service.job.dispatched_at = (received_at - timedelta(seconds=20)).timestamp()
     job_id_str = str(job_service.job.job_id)
 
@@ -366,7 +398,9 @@ async def test_process_callback_skips_validations_for_audit_jobs(monkeypatch: py
     async def _fail_enforce(self, *, job_type, total_runtime_ms, job_service, job_uuid):  # type: ignore[override]
         raise AssertionError("runtime validation should be skipped for audit jobs")
 
-    monkeypatch.setattr(CallbackService, "_detect_flux_kontext_latency_violation", _fail_detect)
+    monkeypatch.setattr(
+        CallbackService, "_detect_flux_kontext_latency_violation", _fail_detect
+    )
     monkeypatch.setattr(CallbackService, "_enforce_flux_kontext_runtime", _fail_enforce)
 
     status, _ = await service.process_callback(

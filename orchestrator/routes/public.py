@@ -5,16 +5,26 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
-from pydantic import AnyHttpUrl, BaseModel
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
+from pydantic import BaseModel
 
 from orchestrator.clients.ss58_client import SS58Client
 from orchestrator.domain.miner import Miner
-from orchestrator.common.job_store import JobStatus, JobType
+from orchestrator.common.job_store import JobStatus
 from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.config import OrchestratorConfig
 from orchestrator.dependencies import (
-    get_audit_failure_repository,
+    get_audit_repository,
     get_callback_service,
     get_config,
     get_health_service,
@@ -32,9 +42,19 @@ from orchestrator.routes.error_mapping import (
     raise_job_service_error,
     raise_listen_service_error,
 )
+from orchestrator.repositories import AuditRepository
+from orchestrator.schemas.audit import AuditRecordResponse
 from orchestrator.schemas.job import RecentJobsResponse
+from orchestrator.schemas.listen import (
+    DebugListenRequest,
+    ListenRequest,
+    RemoteListenRequest,
+)
 from orchestrator.schemas.scores import ScorePayload, ScoreValue, ScoresResponse
-from orchestrator.services.callback_service import CallbackService, CALLBACK_SECRET_HEADER
+from orchestrator.services.callback_service import (
+    CallbackService,
+    CALLBACK_SECRET_HEADER,
+)
 from orchestrator.services.health_service import HealthService
 from orchestrator.services.job_service import JobService
 from orchestrator.services.listen_service import ListenService
@@ -46,7 +66,6 @@ from orchestrator.services.exceptions import (
     JobServiceError,
     ListenServiceError,
 )
-from orchestrator.repositories import AuditFailureRecord, AuditFailureRepository
 from orchestrator.common import stubbing
 
 
@@ -55,21 +74,6 @@ LISTEN_AUTH_SECRET = "orchestrator-listen-secret"
 BURN_HOTKEY = "5EtM9iXMAYRsmt6aoQAoWNDX6yaBnjhmnEQhWKv8HpwkVtML"
 
 logger = logging.getLogger("orchestrator.routes.public")
-
-
-class ListenRequest(BaseModel):
-    job_type: JobType
-    payload: Any
-    job_id: Optional[uuid.UUID] = None
-
-
-class RemoteListenRequest(ListenRequest):
-    webhook_url: AnyHttpUrl
-    route_to_auditor: bool = False
-
-
-class DebugListenRequest(ListenRequest):
-    miner: Miner | None = None
 
 
 DEBUG_CALLBACK_BASE = "https://orchestrator.dippy-bittensor.studio"
@@ -91,26 +95,6 @@ class LastCandidatesResponse(BaseModel):
 class CallbackResponse(BaseModel):
     status: str
     message: str
-
-
-class AuditFailureEntry(BaseModel):
-    id: uuid.UUID
-    created_at: datetime
-    audit_job_id: uuid.UUID
-    target_job_id: Optional[uuid.UUID] = None
-    miner_hotkey: Optional[str] = None
-    netuid: Optional[int] = None
-    network: Optional[str] = None
-    audit_payload: Optional[dict[str, Any]] = None
-    audit_response_payload: Optional[dict[str, Any]] = None
-    target_payload: Optional[dict[str, Any]] = None
-    target_response_payload: Optional[dict[str, Any]] = None
-    audit_image_hash: Optional[str] = None
-    target_image_hash: Optional[str] = None
-
-
-class AuditFailuresResponse(BaseModel):
-    audit_failures: list[AuditFailureEntry]
 
 
 def create_public_router() -> APIRouter:
@@ -139,6 +123,7 @@ def create_public_router() -> APIRouter:
                 job_type=listen_request.job_type,
                 payload=listen_request.payload,
                 desired_job_id=listen_request.job_id,
+                source=listen_request.source,
             )
         except ListenServiceError as exc:
             raise_listen_service_error(exc)
@@ -166,7 +151,9 @@ def create_public_router() -> APIRouter:
                 detail="Invalid service auth secret",
             )
 
-        payload = _attach_webhook_url(listen_request.payload, str(listen_request.webhook_url))
+        payload = _attach_webhook_url(
+            listen_request.payload, str(listen_request.webhook_url)
+        )
         audit_miner = stubbing.resolve_audit_miner(config.audit_miner_network_address)
         override_miner = audit_miner if listen_request.route_to_auditor else None
 
@@ -176,6 +163,7 @@ def create_public_router() -> APIRouter:
                 payload=payload,
                 desired_job_id=listen_request.job_id,
                 override_miner=override_miner,
+                source=listen_request.source,
             )
         except ListenServiceError as exc:
             raise_listen_service_error(exc)
@@ -203,7 +191,9 @@ def create_public_router() -> APIRouter:
                 detail="Invalid service auth secret",
             )
 
-        miner = listen_request.miner or stubbing.resolve_audit_miner(config.audit_miner_network_address)
+        miner = listen_request.miner or stubbing.resolve_audit_miner(
+            config.audit_miner_network_address
+        )
         payload = _override_callback_url(listen_request.payload)
         slog.info(
             "debug.listen.start",
@@ -218,6 +208,7 @@ def create_public_router() -> APIRouter:
                 payload=payload,
                 desired_job_id=listen_request.job_id,
                 override_miner=miner,
+                source=listen_request.source,
             )
         except ListenServiceError as exc:
             raise_listen_service_error(exc)
@@ -225,19 +216,6 @@ def create_public_router() -> APIRouter:
             raise_job_service_error(exc)
 
         return ListenResponse(job_id=job_id)
-
-    @router.get(
-        "/audit_failures",
-        response_model=AuditFailuresResponse,
-        status_code=status.HTTP_200_OK,
-    )
-    async def get_audit_failures(
-        repo: AuditFailureRepository = Depends(get_audit_failure_repository),
-    ) -> AuditFailuresResponse:
-        records = repo.list_recent(limit=100)
-        return AuditFailuresResponse(
-            audit_failures=[_record_to_entry(record) for record in records],
-        )
 
     @router.get(
         "/last_candidates",
@@ -271,7 +249,9 @@ def create_public_router() -> APIRouter:
             meta=None,
         )
 
-    @router.get("/scores", response_model=ScoresResponse, status_code=status.HTTP_200_OK)
+    @router.get(
+        "/scores", response_model=ScoresResponse, status_code=status.HTTP_200_OK
+    )
     async def get_scores(
         request: Request,
         score_service: ScoreService = Depends(get_score_service),
@@ -295,8 +275,23 @@ def create_public_router() -> APIRouter:
             for hotkey, record in stored_scores.items():
                 miner = metagraph_state.get(hotkey)
                 failed_audits = getattr(miner, "failed_audits", 0) if miner else 0
-                is_invalid = miner is not None and not bool(getattr(miner, "valid", True))
-                slashed = hotkey in banned_hotkeys or failed_audits > 0 or is_invalid
+                is_invalid = miner is not None and not bool(
+                    getattr(miner, "valid", True)
+                )
+                try:
+                    failure_count = int(getattr(record, "failure_count", 0) or 0)
+                except (TypeError, ValueError):
+                    failure_count = 0
+                threshold = score_service.failure_slash_threshold
+                failure_slashed = (
+                    threshold is not None and failure_count >= threshold
+                )
+                slashed = (
+                    hotkey in banned_hotkeys
+                    or failed_audits > 0
+                    or is_invalid
+                    or failure_slashed
+                )
                 status_value = "SLASHED" if slashed else "COMPLETED"
                 total_score = 0.0 if slashed else float(record.scores)
                 scores_payload[hotkey] = ScorePayload(
@@ -305,7 +300,9 @@ def create_public_router() -> APIRouter:
                 )
 
             # Calculate empty_scores by summing all scores
-            total_score_sum = sum(float(record.scores) for record in stored_scores.values())
+            total_score_sum = sum(
+                float(record.scores) for record in stored_scores.values()
+            )
             empty_scores = total_score_sum < 1
 
             if empty_scores:
@@ -315,7 +312,6 @@ def create_public_router() -> APIRouter:
                 )
                 scores_payload[BURN_HOTKEY] = payload
             stats = {
-                "source": "score_service",
                 "requested": len(scores_payload),
                 "available": len(scores_payload),
                 "last_updated": last_update.isoformat(),
@@ -328,6 +324,7 @@ def create_public_router() -> APIRouter:
             state,
             job_relay_client=job_service.job_relay,
             banned_hotkeys=set(banned_hotkeys),
+            failure_slash_threshold=score_service.failure_slash_threshold,
         )
 
     @router.get(
@@ -345,12 +342,34 @@ def create_public_router() -> APIRouter:
         return record
 
     @router.get(
+        "/audit/{miner_hotkey}",
+        response_model=AuditRecordResponse,
+        status_code=status.HTTP_200_OK,
+    )
+    async def get_audit_record(
+        miner_hotkey: str,
+        audit_repository: AuditRepository = Depends(get_audit_repository),
+    ) -> AuditRecordResponse:
+        record = audit_repository.fetch(miner_hotkey)
+        if record is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Audit record not found"
+            )
+        return AuditRecordResponse(
+            hotkey=record.hotkey,
+            failed_job=record.failed_job,
+            reference_job=record.reference_job,
+        )
+
+    @router.get(
         "/recent_jobs",
         response_model=RecentJobsResponse,
         status_code=status.HTTP_200_OK,
     )
     async def get_recent_jobs(
-        limit: int = Query(100, ge=1, le=100, description="Number of recent jobs to return (max 100)"),
+        limit: int = Query(
+            100, ge=1, le=100, description="Number of recent jobs to return (max 100)"
+        ),
         job_service: JobService = Depends(get_job_service),
     ) -> RecentJobsResponse:
         try:
@@ -431,7 +450,9 @@ def create_public_router() -> APIRouter:
             )
             raise_job_service_error(exc)
         except HTTPException as http_exc:
-            await sync_waiter.fail(job_id, error=str(http_exc.detail), status=JobStatus.FAILED)
+            await sync_waiter.fail(
+                job_id, error=str(http_exc.detail), status=JobStatus.FAILED
+            )
             cause = getattr(http_exc, "__cause__", None)
             cause_type = type(cause).__name__ if cause else None
             cause_message = str(cause) if cause else None
@@ -446,7 +467,9 @@ def create_public_router() -> APIRouter:
             )
             raise
         except Exception:
-            await sync_waiter.fail(job_id, error="callback_unexpected_error", status=JobStatus.FAILED)
+            await sync_waiter.fail(
+                job_id, error="callback_unexpected_error", status=JobStatus.FAILED
+            )
             logger.exception(
                 "results_callback.unexpected_error job_id=%s status=%s",
                 job_id,
@@ -464,24 +487,6 @@ def create_public_router() -> APIRouter:
         return CallbackResponse(status=response_status, message=message)
 
     return router
-
-
-def _record_to_entry(record: AuditFailureRecord) -> AuditFailureEntry:
-    return AuditFailureEntry(
-        id=record.id,
-        created_at=record.created_at,
-        audit_job_id=record.audit_job_id,
-        target_job_id=record.target_job_id,
-        miner_hotkey=record.miner_hotkey,
-        netuid=record.netuid,
-        network=record.network,
-        audit_payload=record.audit_payload,
-        audit_response_payload=record.audit_response_payload,
-        target_payload=record.target_payload,
-        target_response_payload=record.target_response_payload,
-        audit_image_hash=record.audit_image_hash,
-        target_image_hash=record.target_image_hash,
-    )
 
 
 def _override_callback_url(payload: Any) -> Any:

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import hashlib
@@ -48,18 +47,19 @@ def _set_span_attributes(**attributes: Any) -> None:
         return
     for key, value in attributes.items():
         if value is not None:
-            span.set_attribute(key, str(value) if not isinstance(value, (bool, int, float)) else value)
+            span.set_attribute(
+                key, str(value) if not isinstance(value, (bool, int, float)) else value
+            )
 
 
 CALLBACK_SECRET_HEADER = "X-Callback-Secret"
 
 logger = logging.getLogger(__name__)
 
-_MEDIA_BASE_URL = "https://media.dippy-bittensor.studio"
-_MEDIA_BUCKET = "dippy_studio_public"
+_MEDIA_BASE_URL = "https://media.example.com"
+_MEDIA_BUCKET = "example-bucket"
 _GCS_STORAGE_PREFIX = "https://storage.googleapis.com/"
 
-_FLUX_KONTEXT_MIN_RUNTIME_MS = 8_000
 
 class CallbackService:
     def __init__(
@@ -150,12 +150,6 @@ class CallbackService:
                 dispatch_latency_ms=latencies.get("latency_ms"),
                 job_uuid=job_uuid,
             )
-            await self._enforce_flux_kontext_runtime(
-                job_type=job_type,
-                total_runtime_ms=latencies.get("total_runtime_ms"),
-                job_service=job_service,
-                job_uuid=job_uuid,
-            )
         webhook_url = self._extract_webhook_url(job)
         webhook_forwarded = self._forward_to_webhook(
             webhook_url=webhook_url,
@@ -221,7 +215,9 @@ class CallbackService:
         try:
             final_job = await job_service.get_job(job_uuid)
         except Exception:  # pragma: no cover - defensive
-            logger.exception("callback.sync_waiter.job_fetch_failed job_id=%s", job_uuid)
+            logger.exception(
+                "callback.sync_waiter.job_fetch_failed job_id=%s", job_uuid
+            )
             return
 
         payload = getattr(getattr(final_job, "job_response", None), "payload", None)
@@ -403,7 +399,9 @@ class CallbackService:
         if uri.startswith(_MEDIA_BASE_URL):
             return uri
         if uri.startswith("gs://"):
-            return CallbackService._build_public_image_url(f"{_GCS_STORAGE_PREFIX}{uri[5:]}")
+            return CallbackService._build_public_image_url(
+                f"{_GCS_STORAGE_PREFIX}{uri[5:]}"
+            )
 
         if uri.startswith(_GCS_STORAGE_PREFIX):
             suffix = uri[len(_GCS_STORAGE_PREFIX) :]
@@ -443,7 +441,9 @@ class CallbackService:
         dispatched_ts = getattr(job, "dispatched_at", None)
         if isinstance(dispatched_ts, (int, float)):
             dispatched_dt = datetime.fromtimestamp(dispatched_ts, tz=timezone.utc)
-            dispatch_latency_ms = int((received_at - dispatched_dt).total_seconds() * 1000)
+            dispatch_latency_ms = int(
+                (received_at - dispatched_dt).total_seconds() * 1000
+            )
 
         return {
             "total_runtime_ms": total_latency_ms,
@@ -501,7 +501,9 @@ class CallbackService:
             payload.update(image_info)
 
         callback_metadata = {
-            "has_image": bool(image_info.get("image_uri") or image_info.get("image_url")),
+            "has_image": bool(
+                image_info.get("image_uri") or image_info.get("image_url")
+            ),
             "secret_verified": True,
             "secret_provided": bool(provided_secret),
         }
@@ -524,7 +526,8 @@ class CallbackService:
         normalized_status = status.strip().lower()
         failure_reason = forced_failure_reason
         if failure_reason is None and (
-            normalized_status in {JobStatus.FAILED.value, "failed", "error"} or (error and error.strip())
+            normalized_status in {JobStatus.FAILED.value, "failed", "error"}
+            or (error and error.strip())
         ):
             failure_reason = f"callback_status:{status}"
 
@@ -608,31 +611,6 @@ class CallbackService:
             )
             await job_service.mark_job_failure(job_uuid, "callback_secret_mismatch")
             raise CallbackSecretMismatch("Callback secret mismatch")
-
-    async def _enforce_flux_kontext_runtime(
-        self,
-        *,
-        job_type: Optional[str],
-        total_runtime_ms: Optional[int],
-        job_service: JobService,
-        job_uuid: uuid.UUID,
-    ) -> None:
-        if not is_h100_kontext_job_type(job_type):
-            return
-        if total_runtime_ms is None:
-            return
-        if total_runtime_ms >= _FLUX_KONTEXT_MIN_RUNTIME_MS:
-            return
-
-        logger.warning(
-            "callback.flux_kontext_runtime_violation job_id=%s job_type=%s elapsed_ms=%s min_required_ms=%s",
-            job_uuid,
-            job_type,
-            total_runtime_ms,
-            _FLUX_KONTEXT_MIN_RUNTIME_MS,
-        )
-        await job_service.mark_job_failure(job_uuid, "flux_kontext_min_runtime_violation")
-        raise CallbackValidationError("Flux-Kontext jobs must run for at least 10 seconds before completing")
 
     @staticmethod
     def _extract_webhook_url(job: Any) -> Optional[str]:

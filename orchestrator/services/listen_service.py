@@ -7,6 +7,7 @@ from urllib import error as urllib_error
 
 from orchestrator.common.epistula_client import EpistulaClient
 from orchestrator.common.job_store import JobType
+from orchestrator.common.job_sources import JobSource
 from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.domain.miner import Miner
 from orchestrator.services.job_service import JobService
@@ -28,7 +29,9 @@ def _set_span_attributes(**attributes: Any) -> None:
         return
     for key, value in attributes.items():
         if value is not None:
-            span.set_attribute(key, str(value) if not isinstance(value, (bool, int, float)) else value)
+            span.set_attribute(
+                key, str(value) if not isinstance(value, (bool, int, float)) else value
+            )
 
 
 TEMP_OVERRIDE_STEPS = 10
@@ -73,6 +76,7 @@ class ListenService:
         job_type: JobType,
         payload: Any,
         desired_job_id: Optional[uuid.UUID],
+        source: JobSource | str | None = None,
         override_miner: Optional[Miner] = None,
     ) -> uuid.UUID:
         miner = self._select_miner(job_type, override=override_miner)
@@ -82,6 +86,7 @@ class ListenService:
             payload=normalized_payload,
             miner=miner,
             desired_job_id=desired_job_id,
+            source=source,
         )
 
         try:
@@ -100,7 +105,9 @@ class ListenService:
         await self._dispatch(job, miner, inference_url, dispatch_payload)
         return job.job_id
 
-    def _select_miner(self, job_type: JobType, override: Optional[Miner] = None) -> Miner:
+    def _select_miner(
+        self, job_type: JobType, override: Optional[Miner] = None
+    ) -> Miner:
         if override is not None:
             return override
 
@@ -120,12 +127,14 @@ class ListenService:
         payload: Any,
         miner: Miner,
         desired_job_id: Optional[uuid.UUID],
+        source: JobSource | str | None = None,
     ):
         job = await self._job_service.create_job(
             job_type=job_type,
             payload=payload,
             hotkey=miner.hotkey,
             job_id=desired_job_id,
+            source=source,
         )
         self._logger.info(
             "job.created",
@@ -148,7 +157,10 @@ class ListenService:
     ) -> bool:
         timeout = self._resolve_dispatch_timeout(getattr(job, "job_request", None))
         try:
-            status_code, response_text = await self._epistula_client.post_signed_request(
+            (
+                status_code,
+                response_text,
+            ) = await self._epistula_client.post_signed_request(
                 url=inference_url,
                 payload=payload,
                 miner_hotkey=miner.hotkey,
@@ -240,7 +252,9 @@ class ListenService:
                 error=str(exc),
             )
 
-    def _resolve_inference_url(self, miner: Miner, job_type: JobType, *, sync: bool = False) -> str:
+    def _resolve_inference_url(
+        self, miner: Miner, job_type: JobType, *, sync: bool = False
+    ) -> str:
         address = (miner.network_address or "").strip()
         # img-h100* jobs must hit the edit endpoint (including any string aliases)
         uses_edit = self._is_kontext_job_type(job_type)
@@ -262,7 +276,11 @@ class ListenService:
         job_type_value = ""
         if job_request is not None:
             job_type_value = getattr(job_request, "job_type", "") or ""
-        job_type_str = job_type_value.value if isinstance(job_type_value, JobType) else str(job_type_value)
+        job_type_str = (
+            job_type_value.value
+            if isinstance(job_type_value, JobType)
+            else str(job_type_value)
+        )
         if "img-h100" in job_type_str.lower():
             return 60
         return 20
@@ -308,7 +326,9 @@ class ListenService:
         if not self._is_kontext_job_type(job_type):
             return payload
 
-        normalized_steps = self._normalize_inference_steps(payload.get("num_inference_steps"))
+        normalized_steps = self._normalize_inference_steps(
+            payload.get("num_inference_steps")
+        )
         if normalized_steps is None or normalized_steps <= TEMP_OVERRIDE_STEPS:
             return payload
 

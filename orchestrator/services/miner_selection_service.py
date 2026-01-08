@@ -60,13 +60,16 @@ class MinerSelectionService:
     def get_last_candidates(self) -> list[Tuple[datetime, Miner]]:
         return list(self._last_candidates)
 
-    def _score_multiplier(self, miner: Miner, payload: Optional[Mapping[str, Any]]) -> float:
+    def _score_multiplier(
+        self, miner: Miner, payload: Optional[Mapping[str, Any]]
+    ) -> float:
         if getattr(miner, "failed_audits", 0):
             return 0.0
         failure_penalty = self._failure_penalty(getattr(miner, "failure_count", 0))
         if not payload:
             base_multiplier = 1.0
         else:
+
             def _coerce_float(value: Any) -> Optional[float]:
                 try:
                     if value is None:

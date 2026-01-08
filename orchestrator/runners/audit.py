@@ -16,14 +16,23 @@ from sn_uuid import uuid7
 from orchestrator.clients.ss58_client import SS58Client
 from orchestrator.common.epistula_client import EpistulaClient
 from orchestrator.common.datetime import parse_datetime
-from orchestrator.common.job_store import AuditStatus, Job, JobRequest, JobStatus, JobType
+from orchestrator.common.job_store import (
+    AuditStatus,
+    Job,
+    JobRequest,
+    JobStatus,
+    JobType,
+)
 from orchestrator.common.stubbing import resolve_audit_miner
 from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.domain.miner import Miner
-from orchestrator.repositories import AuditFailureRecord, AuditFailureRepository
+from orchestrator.repositories import AuditRecord, AuditRepository
 from orchestrator.runners.base import InstrumentedRunner
 from orchestrator.services.audit_service import AuditRunSummary, AuditService
-from orchestrator.services.listen_service import ListenService, _TASK_TYPE_PAYLOAD_OVERRIDES
+from orchestrator.services.listen_service import (
+    ListenService,
+    _TASK_TYPE_PAYLOAD_OVERRIDES,
+)
 from orchestrator.services.job_service import JobService
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 
@@ -99,7 +108,11 @@ class _AuditSeedQueue:
             return None
 
         try:
-            decoded = raw.decode() if isinstance(raw, (bytes, bytearray, memoryview)) else str(raw)
+            decoded = (
+                raw.decode()
+                if isinstance(raw, (bytes, bytearray, memoryview))
+                else str(raw)
+            )
             return json.loads(decoded)
         except Exception as exc:  # pragma: no cover - defensive deserialization guard
             self._log_warn("audit.seed.queue_decode_failed", error=str(exc))
@@ -126,7 +139,9 @@ class _AuditSeedQueue:
             logger.warning(event, queue_key=self._key, **fields)
             return
         if logger is not None:
-            logger.warning("%s queue_key=%s %s", event, self._key, fields if fields else "")
+            logger.warning(
+                "%s queue_key=%s %s", event, self._key, fields if fields else ""
+            )
 
 
 class _BaseAuditRunner(InstrumentedRunner[AuditRunSummary]):
@@ -159,7 +174,9 @@ class _BaseAuditRunner(InstrumentedRunner[AuditRunSummary]):
             "apply_changes": self._apply_changes,
         }
 
-    def _complete_fields(self, summary: AuditRunSummary | None, start_fields: dict[str, Any]) -> dict[str, Any]:
+    def _complete_fields(
+        self, summary: AuditRunSummary | None, start_fields: dict[str, Any]
+    ) -> dict[str, Any]:
         if summary is None:
             return {**start_fields, "status": "skipped"}
         return {
@@ -219,7 +236,9 @@ class AuditSeedRunner(_BaseAuditRunner):
             logger=logger,
         )
         job_service = getattr(audit_service, "_job_service", None)
-        if not isinstance(job_service, JobService):  # pragma: no cover - defensive in prod
+        if not isinstance(
+            job_service, JobService
+        ):  # pragma: no cover - defensive in prod
             raise ValueError("AuditService must expose JobService for seeding")
         self._job_service: JobService = job_service
         self._job_relay = job_service.job_relay
@@ -227,7 +246,11 @@ class AuditSeedRunner(_BaseAuditRunner):
         self._epistula_client = EpistulaClient(None)
         self._audit_miner: Miner = audit_miner or resolve_audit_miner()
         base_logger = self._logger
-        listen_logger = base_logger if isinstance(base_logger, StructuredLogger) else StructuredLogger(name="orchestrator.audit.listen")
+        listen_logger = (
+            base_logger
+            if isinstance(base_logger, StructuredLogger)
+            else StructuredLogger(name="orchestrator.audit.listen")
+        )
         self._listen_service = ListenService(
             job_service=job_service,
             metagraph=_FixedMetagraph(self._audit_miner),
@@ -242,7 +265,9 @@ class AuditSeedRunner(_BaseAuditRunner):
         self._job_type = normalized_job_type or default_job_type
         self._job_type_lower = self._job_type.lower()
         self._dispatch_delay_seconds = max(float(dispatch_delay_seconds or 0.0), 0.0)
-        self._redis_namespace = (redis_namespace or "audit_seed").strip() or "audit_seed"
+        self._redis_namespace = (
+            redis_namespace or "audit_seed"
+        ).strip() or "audit_seed"
         self._redis_client = self._resolve_redis_client(redis_client, redis_url)
         self._queue: _AuditSeedQueue | None = None
         if self._redis_client is not None:
@@ -265,11 +290,17 @@ class AuditSeedRunner(_BaseAuditRunner):
                     error=str(exc),
                 )
 
-    def _resolve_redis_client(self, redis_client: Any | None, redis_url: str | None) -> Any | None:
+    def _resolve_redis_client(
+        self, redis_client: Any | None, redis_url: str | None
+    ) -> Any | None:
         if redis_client is not None:
             return redis_client
 
-        resolved_url = redis_url or os.getenv("AUDIT_SEED_REDIS_URL") or os.getenv("LISTEN_SYNC_REDIS_URL")
+        resolved_url = (
+            redis_url
+            or os.getenv("AUDIT_SEED_REDIS_URL")
+            or os.getenv("LISTEN_SYNC_REDIS_URL")
+        )
         if not resolved_url:
             self._log(
                 "warning",
@@ -390,7 +421,9 @@ class AuditSeedRunner(_BaseAuditRunner):
             if job_id is None:
                 continue
             try:
-                audit_job = await self.create_audit_job(job_id, queued_job, auditor=audit_miner)
+                audit_job = await self.create_audit_job(
+                    job_id, queued_job, auditor=audit_miner
+                )
             except Exception as exc:  # pragma: no cover - seed resilience
                 self._log(
                     "warning",
@@ -441,7 +474,9 @@ class AuditSeedRunner(_BaseAuditRunner):
             "queue_key": self._queue.key if self._queue is not None else None,
         }
 
-    def _complete_fields(self, summary: AuditRunSummary | None, start_fields: dict[str, Any]) -> dict[str, Any]:
+    def _complete_fields(
+        self, summary: AuditRunSummary | None, start_fields: dict[str, Any]
+    ) -> dict[str, Any]:
         if summary is None:
             return {**start_fields, "status": "skipped"}
         fields = super()._complete_fields(summary, start_fields)
@@ -500,7 +535,10 @@ class AuditSeedRunner(_BaseAuditRunner):
 
     @staticmethod
     def _is_not_audited(job: dict[str, Any]) -> bool:
-        return str(job.get("audit_status") or "").lower() in {"not_audited", "not-audited"}
+        return str(job.get("audit_status") or "").lower() in {
+            "not_audited",
+            "not-audited",
+        }
 
     @staticmethod
     def _extract_timestamp(job: dict[str, Any]) -> datetime:
@@ -524,12 +562,16 @@ class AuditSeedRunner(_BaseAuditRunner):
         if isinstance(value, dict):
             cleaned: dict[str, Any] = {}
             for child_key, child_value in value.items():
-                child_key_lower = child_key.lower() if isinstance(child_key, str) else ""
+                child_key_lower = (
+                    child_key.lower() if isinstance(child_key, str) else ""
+                )
                 if child_key_lower == "callback_secret":
                     continue
                 if "prompt" in child_key_lower and "seed" not in child_key_lower:
                     continue
-                cleaned[child_key] = cls._strip_prompts_and_secrets(child_value, key=child_key)
+                cleaned[child_key] = cls._strip_prompts_and_secrets(
+                    child_value, key=child_key
+                )
             return cleaned
 
         if isinstance(value, list):
@@ -601,14 +643,19 @@ class AuditSeedRunner(_BaseAuditRunner):
         timeout = self._listen_service._resolve_dispatch_timeout(job.job_request)
 
         try:
-            status_code, response_text = await self._epistula_client.post_signed_request(
+            (
+                status_code,
+                response_text,
+            ) = await self._epistula_client.post_signed_request(
                 url=inference_url,
                 payload=payload,
                 miner_hotkey=miner.hotkey,
                 timeout=timeout,
             )
         except urllib_error.URLError as exc:
-            await self._job_service.mark_job_failure(job.job_id, f"dispatch_error:{exc.reason or type(exc).__name__}")
+            await self._job_service.mark_job_failure(
+                job.job_id, f"dispatch_error:{exc.reason or type(exc).__name__}"
+            )
             self._log(
                 "error",
                 "audit.seed.dispatch_error",
@@ -619,7 +666,9 @@ class AuditSeedRunner(_BaseAuditRunner):
             )
             return
         except Exception as exc:  # noqa: BLE001
-            await self._job_service.mark_job_failure(job.job_id, f"dispatch_error:{type(exc).__name__}")
+            await self._job_service.mark_job_failure(
+                job.job_id, f"dispatch_error:{type(exc).__name__}"
+            )
             self._log(
                 "error",
                 "audit.seed.dispatch_error",
@@ -631,7 +680,9 @@ class AuditSeedRunner(_BaseAuditRunner):
             return
 
         if status_code >= 400:
-            await self._job_service.mark_job_failure(job.job_id, f"dispatch_http_{status_code}")
+            await self._job_service.mark_job_failure(
+                job.job_id, f"dispatch_http_{status_code}"
+            )
             self._log(
                 "warning",
                 "audit.seed.dispatch_failed",
@@ -685,7 +736,6 @@ class _FixedMetagraph:
         return self._audit_miner
 
 
-
 class AuditCheckRunner(_BaseAuditRunner):
     """Runs the audit verification pass (optionally persists changes)."""
 
@@ -696,7 +746,7 @@ class AuditCheckRunner(_BaseAuditRunner):
         netuid: int,
         network: str,
         apply_changes: bool = True,
-        audit_failure_repository: AuditFailureRepository | None = None,
+        audit_repository: AuditRepository | None = None,
         ss58_client: SS58Client | None = None,
         logger: StructuredLogger | logging.Logger | None = None,
     ) -> None:
@@ -710,14 +760,20 @@ class AuditCheckRunner(_BaseAuditRunner):
         )
         job_service = getattr(audit_service, "_job_service", None)
         miner_client = getattr(audit_service, "_miner_metagraph_service", None)
-        if not isinstance(job_service, JobService):  # pragma: no cover - defensive guard
+        if not isinstance(
+            job_service, JobService
+        ):  # pragma: no cover - defensive guard
             raise ValueError("AuditService must expose JobService for audit checks")
-        if not isinstance(miner_client, MinerMetagraphService):  # pragma: no cover - defensive guard
-            raise ValueError("AuditService must expose MinerMetagraphService for audit checks")
+        if not isinstance(
+            miner_client, MinerMetagraphService
+        ):  # pragma: no cover - defensive guard
+            raise ValueError(
+                "AuditService must expose MinerMetagraphService for audit checks"
+            )
         self._job_service: JobService = job_service
         self._job_relay = job_service.job_relay
         self._miner_client: MinerMetagraphService = miner_client
-        self._audit_failure_repo = audit_failure_repository
+        self._audit_repo = audit_repository
         self._ss58_client = ss58_client
 
     async def _run(self) -> AuditRunSummary | None:
@@ -734,7 +790,11 @@ class AuditCheckRunner(_BaseAuditRunner):
             return None
 
         job_index = self._index_jobs(jobs)
-        audit_jobs = [job for job in jobs if job.get("is_audit_job") is True and self._is_completed(job)]
+        audit_jobs = [
+            job
+            for job in jobs
+            if job.get("is_audit_job") is True and self._is_completed(job)
+        ]
 
         mismatches = 0
         increments = 0
@@ -834,7 +894,9 @@ class AuditCheckRunner(_BaseAuditRunner):
         )
         return summary
 
-    def _complete_fields(self, summary: AuditRunSummary | None, start_fields: dict[str, Any]) -> dict[str, Any]:
+    def _complete_fields(
+        self, summary: AuditRunSummary | None, start_fields: dict[str, Any]
+    ) -> dict[str, Any]:
         if summary is None:
             return {**start_fields, "status": "skipped"}
         fields = super()._complete_fields(summary, start_fields)
@@ -846,7 +908,9 @@ class AuditCheckRunner(_BaseAuditRunner):
         )
         return fields
 
-    def _index_jobs(self, jobs: list[dict[str, Any]]) -> dict[uuid.UUID, dict[str, Any]]:
+    def _index_jobs(
+        self, jobs: list[dict[str, Any]]
+    ) -> dict[uuid.UUID, dict[str, Any]]:
         index: dict[uuid.UUID, dict[str, Any]] = {}
         for job in jobs:
             job_id = self._normalize_uuid(job.get("job_id"))
@@ -877,7 +941,9 @@ class AuditCheckRunner(_BaseAuditRunner):
         if miner is None:
             return None
         failed_audits = getattr(miner, "failed_audits", 0) or 0
-        updated = miner.model_copy(update={"failed_audits": failed_audits + 1, "valid": False})
+        updated = miner.model_copy(
+            update={"failed_audits": failed_audits + 1, "valid": False}
+        )
         return self._miner_client.upsert_miner(updated)
 
     async def _record_ban(self, hotkey: str) -> None:
@@ -904,37 +970,49 @@ class AuditCheckRunner(_BaseAuditRunner):
         target_hash: str,
         hotkey: str | None,
     ) -> None:
-        if self._audit_failure_repo is None:
+        if self._audit_repo is None:
             return
 
-        audit_job_id = self._normalize_uuid(audit_job.get("job_id"))
-        if audit_job_id is None:
+        hotkey_normalized = hotkey.strip() if hotkey else ""
+        if not hotkey_normalized:
             return
 
         try:
-            record = AuditFailureRecord(
-                id=uuid7(),
-                created_at=datetime.now(timezone.utc),
-                audit_job_id=audit_job_id,
-                target_job_id=self._normalize_uuid(target_job.get("job_id")),
-                miner_hotkey=hotkey.strip() if hotkey else None,
-                netuid=self._netuid,
-                network=self._network,
-                audit_payload=self._extract_payload(audit_job),
-                audit_response_payload=self._extract_response_payload(audit_job),
-                target_payload=self._extract_payload(target_job),
-                target_response_payload=self._extract_response_payload(target_job),
-                audit_image_hash=audit_hash,
-                target_image_hash=target_hash,
+            record = AuditRecord(
+                hotkey=hotkey_normalized,
+                failed_job=self._build_job_snapshot(target_job, target_hash),
+                reference_job=self._build_job_snapshot(audit_job, audit_hash),
             )
-            self._audit_failure_repo.upsert_failure(record)
+            self._audit_repo.insert(record)
         except Exception as exc:  # pragma: no cover - defensive persistence guard
             self._log(
                 "warning",
                 "audit.check.record_failure_failed",
-                audit_job_id=str(audit_job_id),
+                audit_job_id=str(audit_job.get("job_id")),
                 error=str(exc),
             )
+
+    def _build_job_snapshot(
+        self, job: dict[str, Any] | None, image_hash: str | None
+    ) -> dict[str, Any]:
+        job_id = (
+            self._normalize_uuid(job.get("job_id")) if isinstance(job, dict) else None
+        )
+        payload = self._extract_payload(job)
+        response_payload = self._extract_response_payload(job)
+        return {
+            "job_id": str(job_id)
+            if job_id is not None
+            else job.get("job_id")
+            if isinstance(job, dict)
+            else None,
+            "miner_hotkey": job.get("miner_hotkey") if isinstance(job, dict) else None,
+            "payload": payload,
+            "response_payload": response_payload,
+            "image_hash": image_hash,
+            "status": job.get("status") if isinstance(job, dict) else None,
+            "is_audit_job": job.get("is_audit_job") if isinstance(job, dict) else None,
+        }
 
     @staticmethod
     def _extract_payload(job: dict[str, Any] | None) -> dict[str, Any] | None:

@@ -9,22 +9,36 @@ from typing import Any, Dict, Optional
 from uuid import UUID
 
 import httpx
+import httpcore
 
 logger = logging.getLogger(__name__)
 
 
 JOBRELAY_AUTH_HEADER = "X-Service-Auth-Secret"
+_TIMEOUT_EXCEPTIONS = (httpx.TimeoutException, httpcore.TimeoutException)
+
+
+class JobRelayTimeoutError(TimeoutError):
+    """Raised when a job relay request exceeds the configured timeout."""
 
 
 class BaseJobRelayClient:
-
-    async def create_job(self, job_id: UUID, payload: Dict[str, Any]) -> None:  # pragma: no cover - noop
+    async def create_job(
+        self, job_id: UUID, payload: Dict[str, Any]
+    ) -> Optional[UUID]:  # pragma: no cover - noop
         logger.debug("jobrelay.create.noop job_id=%s", job_id)
+        return None
 
-    async def update_job(self, job_id: UUID, updates: Dict[str, Any]) -> None:  # pragma: no cover - noop
-        logger.debug("jobrelay.update.noop job_id=%s updates=%s", job_id, list(updates.keys()))
+    async def update_job(
+        self, job_id: UUID, updates: Dict[str, Any]
+    ) -> None:  # pragma: no cover - noop
+        logger.debug(
+            "jobrelay.update.noop job_id=%s updates=%s", job_id, list(updates.keys())
+        )
 
-    async def fetch_job(self, job_id: UUID) -> Optional[Dict[str, Any]]:  # pragma: no cover - noop
+    async def fetch_job(
+        self, job_id: UUID
+    ) -> Optional[Dict[str, Any]]:  # pragma: no cover - noop
         logger.debug("jobrelay.fetch.noop job_id=%s", job_id)
         return None
 
@@ -45,7 +59,9 @@ class BaseJobRelayClient:
         )
         return []
 
-    async def list_recent_jobs(self, *, limit: int) -> list[Dict[str, Any]]:  # pragma: no cover - noop
+    async def list_recent_jobs(
+        self, *, limit: int
+    ) -> list[Dict[str, Any]]:  # pragma: no cover - noop
         logger.debug("jobrelay.list_recent.noop limit=%s", limit)
         return []
 
@@ -76,15 +92,22 @@ class JobRelaySettings:
 
 
 class JobRelayHttpClient(BaseJobRelayClient):
-
     def __init__(self, settings: JobRelaySettings) -> None:
         self._base_url = settings.base_url.rstrip("/")
         self._auth_header = JOBRELAY_AUTH_HEADER
         self._auth_token = settings.auth_token
         self._timeout = settings.timeout_seconds
 
-    async def create_job(self, job_id: UUID, payload: Dict[str, Any]) -> None:
-        await self._request("POST", f"/jobs/{job_id}", json=payload, params=None)
+    async def create_job(self, job_id: UUID, payload: Dict[str, Any]) -> Optional[UUID]:
+        response = await self._request(
+            "POST", f"/jobs/{job_id}", json=payload, params=None
+        )
+        if isinstance(response, dict) and "job_id" in response:
+            try:
+                return UUID(str(response["job_id"]))
+            except Exception:
+                return None
+        return None
 
     async def update_job(self, job_id: UUID, updates: Dict[str, Any]) -> None:
         if not updates:
@@ -171,12 +194,28 @@ class JobRelayHttpClient(BaseJobRelayClient):
             headers[self._auth_header] = self._auth_token
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.request(method, url, json=json, params=params, headers=headers)
+            try:
+                response = await client.request(
+                    method, url, json=json, params=params, headers=headers
+                )
+            except _TIMEOUT_EXCEPTIONS as exc:
+                logger.warning(
+                    "jobrelay.request.timeout method=%s url=%s timeout=%s",
+                    method,
+                    url,
+                    self._timeout,
+                    exc_info=exc,
+                )
+                raise JobRelayTimeoutError(
+                    f"Job relay request timed out: {method} {url}"
+                ) from exc
             if allow_404 and response.status_code == 404:
                 return None
             try:
                 response.raise_for_status()
-            except httpx.HTTPStatusError as exc:  # pragma: no cover - network error reporting
+            except (
+                httpx.HTTPStatusError
+            ) as exc:  # pragma: no cover - network error reporting
                 logger.warning(
                     "jobrelay.request.failed method=%s url=%s status=%s body=%s",
                     method,
@@ -205,4 +244,5 @@ __all__ = [
     "BaseJobRelayClient",
     "JobRelayHttpClient",
     "JobRelaySettings",
+    "JobRelayTimeoutError",
 ]

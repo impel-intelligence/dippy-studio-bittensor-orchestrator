@@ -23,7 +23,9 @@ class PinataClient:
         timeout_seconds: int = 20,
     ) -> None:
         if not jwt and not (api_key and api_secret):
-            raise ValueError("Pinata credentials are required (set SS58_PINATA_JWT or API key/secret)")
+            raise ValueError(
+                "Pinata credentials are required (set SS58_PINATA_JWT or API key/secret)"
+            )
         self.jwt = jwt.strip() if jwt else None
         self.api_key = api_key.strip() if api_key else None
         self.api_secret = api_secret.strip() if api_secret else None
@@ -43,7 +45,9 @@ class PinataClient:
         else:
             headers["pinata_api_key"] = self.api_key or ""
             headers["pinata_secret_api_key"] = self.api_secret or ""
-        resp = requests.post(url, json=body, headers=headers, timeout=self.timeout_seconds)
+        resp = requests.post(
+            url, json=body, headers=headers, timeout=self.timeout_seconds
+        )
         try:
             resp.raise_for_status()
         except Exception:

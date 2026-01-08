@@ -74,7 +74,11 @@ class _StubSS58Client:
 async def test_audit_service_runs_in_dry_mode() -> None:
     jobs = [
         _job_record(miner_hotkey="hk-a", audit_status=AuditStatus.audit_success),
-        _job_record(miner_hotkey="hk-b", audit_status=AuditStatus.audit_failed, is_audit_job=False),
+        _job_record(
+            miner_hotkey="hk-b",
+            audit_status=AuditStatus.audit_failed,
+            is_audit_job=False,
+        ),
     ]
     job_service = _FakeJobService(jobs)
     miner_client = _FakeMetagraphClient(

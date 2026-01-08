@@ -65,9 +65,15 @@ def test_score_history_success_sequence() -> None:
     assert history.failure_count == 0
     value_first = job_to_weighted_score(jobs[0])
     value_second = job_to_weighted_score(jobs[1])
-    decay_between = 0.5 ** ((second_ts - first_ts).total_seconds() / settings.ema_half_life_seconds)
-    decay_to_reference = 0.5 ** ((now - second_ts).total_seconds() / settings.ema_half_life_seconds)
-    ema_after_second = settings.ema_alpha * value_second + (1.0 - settings.ema_alpha) * (value_first * decay_between)
+    decay_between = 0.5 ** (
+        (second_ts - first_ts).total_seconds() / settings.ema_half_life_seconds
+    )
+    decay_to_reference = 0.5 ** (
+        (now - second_ts).total_seconds() / settings.ema_half_life_seconds
+    )
+    ema_after_second = settings.ema_alpha * value_second + (
+        1.0 - settings.ema_alpha
+    ) * (value_first * decay_between)
     expected_score = ema_after_second * decay_to_reference
     assert history.ema_score == pytest.approx(expected_score, rel=1e-5)
     assert history.scores == pytest.approx(expected_score, rel=1e-5)
@@ -118,7 +124,9 @@ def test_score_history_failure_penalty_caps_score() -> None:
     penalty_factor = 1.0 - settings.failure_penalty_weight
     decay_before_failure = 0.5 ** (60.0 / settings.ema_half_life_seconds)
     decay_after_failure = 0.5 ** (60.0 / settings.ema_half_life_seconds)
-    expected_score = weighted_success * decay_before_failure * penalty_factor * decay_after_failure
+    expected_score = (
+        weighted_success * decay_before_failure * penalty_factor * decay_after_failure
+    )
     assert history.ema_score == pytest.approx(expected_score, rel=1e-5)
     assert history.scores == pytest.approx(expected_score, rel=1e-5)
 
@@ -159,7 +167,11 @@ class _DummyRelay:
             completed = job.get("completed_at")
             event_time: datetime | None
             if isinstance(completed, datetime):
-                event_time = completed if completed.tzinfo else completed.replace(tzinfo=timezone.utc)
+                event_time = (
+                    completed
+                    if completed.tzinfo
+                    else completed.replace(tzinfo=timezone.utc)
+                )
             elif isinstance(completed, str):
                 try:
                     parsed = datetime.fromisoformat(completed.replace("Z", "+00:00"))
@@ -205,8 +217,15 @@ async def test_build_scores_from_state_applies_failure_penalty() -> None:
     settings = ScoreSettings().normalized()
     weighted_success = job_to_weighted_score(success)
     penalty_factor = 1.0 - settings.failure_penalty_weight
-    decay_before_failure = 0.5 ** ((failure_at - success_at).total_seconds() / settings.ema_half_life_seconds)
-    decay_after_failure = 0.5 ** ((datetime.now(timezone.utc) - failure_at).total_seconds() / settings.ema_half_life_seconds)
-    expected_penalized = weighted_success * decay_before_failure * penalty_factor * decay_after_failure
+    decay_before_failure = 0.5 ** (
+        (failure_at - success_at).total_seconds() / settings.ema_half_life_seconds
+    )
+    decay_after_failure = 0.5 ** (
+        (datetime.now(timezone.utc) - failure_at).total_seconds()
+        / settings.ema_half_life_seconds
+    )
+    expected_penalized = (
+        weighted_success * decay_before_failure * penalty_factor * decay_after_failure
+    )
     assert score_value == pytest.approx(expected_penalized, rel=1e-4)
     assert response.stats["failures_total"] == 1

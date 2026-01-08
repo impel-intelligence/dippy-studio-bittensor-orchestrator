@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Iterable, Sequence
 
 from orchestrator.runners.audit import AuditCheckRunner, AuditSeedRunner
@@ -24,12 +25,30 @@ async def _run_metagraph(orchestrator: Orchestrator) -> None:
         orchestrator.config.subnet.netuid,
         orchestrator.config.subnet.network,
     )
+    try:
+        keypair = orchestrator.epistula_client.keypair
+        ss58_addr = getattr(keypair, "ss58_address", "")
+        public_key = None
+        try:
+            pk = getattr(keypair, "public_key", None)
+            if pk is not None:
+                public_key = pk.hex() if hasattr(pk, "hex") else str(pk)
+        except Exception:
+            public_key = None
+        WORKER_LOGGER.info(
+            "worker.metagraph.epistula_key ss58=%s public_key=%s",
+            ss58_addr,
+            public_key or "",
+        )
+    except Exception:
+        WORKER_LOGGER.exception("worker.metagraph.epistula_key_failed")
     runner = MetagraphStateRunner(
         miner_metagraph_client=orchestrator.miner_metagraph_service,
         netuid=orchestrator.config.subnet.netuid,
         network=orchestrator.config.subnet.network,
         subnet_fetcher=orchestrator.subnet_state_service.fetch_state,
         subnet_state_client=orchestrator.subnet_state_service,
+        ss58_client=orchestrator.ss58_client,
         logger=orchestrator.server_context.logger,
     )
     await runner.execute()
@@ -40,7 +59,9 @@ async def _run_metagraph(orchestrator: Orchestrator) -> None:
     )
 
 
-async def _run_score(orchestrator: Orchestrator, trace_hotkeys: Sequence[str] | None = None) -> None:
+async def _run_score(
+    orchestrator: Orchestrator, trace_hotkeys: Sequence[str] | None = None
+) -> None:
     WORKER_LOGGER.info(
         "worker.score.start netuid=%s network=%s",
         orchestrator.config.subnet.netuid,
@@ -71,6 +92,7 @@ async def _run_score(orchestrator: Orchestrator, trace_hotkeys: Sequence[str] | 
         summary.zeroed_hotkeys,
         summary.jobs_considered,
     )
+
 
 async def _run_audit_seed(
     orchestrator: Orchestrator,
@@ -132,7 +154,9 @@ async def _run_audit_seed(
     )
 
 
-async def _run_audit_check(orchestrator: Orchestrator, *, apply_changes: bool = False) -> None:
+async def _run_audit_check(
+    orchestrator: Orchestrator, *, apply_changes: bool = False
+) -> None:
     WORKER_LOGGER.info(
         "worker.audit_check.start netuid=%s network=%s apply_changes=%s",
         orchestrator.config.subnet.netuid,
@@ -144,7 +168,7 @@ async def _run_audit_check(orchestrator: Orchestrator, *, apply_changes: bool = 
         netuid=orchestrator.config.subnet.netuid,
         network=orchestrator.config.subnet.network,
         apply_changes=apply_changes,
-        audit_failure_repository=orchestrator.audit_failure_repository,
+        audit_repository=orchestrator.audit_repository,
         ss58_client=orchestrator.ss58_client,
         logger=orchestrator.server_context.logger,
     )
@@ -184,6 +208,16 @@ async def _run_audit_broadcast(orchestrator: Orchestrator) -> None:
         epistula_client=orchestrator.epistula_client,
     )
 
+    ban_on_hash_mismatch_only = str(
+        os.getenv("AUDIT_BROADCAST_BAN_ON_HASH_MISMATCH_ONLY", "")
+    ).lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
     runner = AuditBroadcastRunner(
         job_service=orchestrator.job_service,
         miner_metagraph_service=orchestrator.miner_metagraph_service,
@@ -192,8 +226,10 @@ async def _run_audit_broadcast(orchestrator: Orchestrator) -> None:
         audit_miner=orchestrator.audit_miner,
         netuid=orchestrator.config.subnet.netuid,
         network=orchestrator.config.subnet.network,
+        audit_repository=orchestrator.audit_repository,
         ss58_client=orchestrator.ss58_client,
         logger=orchestrator.server_context.logger,
+        ban_on_hash_mismatch_only=ban_on_hash_mismatch_only,
     )
     summary = await runner.execute()
     if summary is None:

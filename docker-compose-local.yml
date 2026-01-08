@@ -4,9 +4,9 @@ services:
     build:
       context: .
       dockerfile: orchestrator/orchestrator.dev.Dockerfile
-    command: python orchestrator/server.py --live-reload --port ${ORCHESTRATOR_PORT:-42169}
+    command: python orchestrator/server.py --live-reload --port ${ORCHESTRATOR_PORT:-42069}
     ports:
-      - "${ORCHESTRATOR_PORT:-42169}:${ORCHESTRATOR_PORT:-42169}"
+      - "${ORCHESTRATOR_PORT:-42069}:${ORCHESTRATOR_PORT:-42069}"
     volumes:
       - .:/app
       - ${HOME}/.bittensor:/home/appuser/.bittensor:ro
@@ -15,19 +15,23 @@ services:
       - default
       - signoz-net
     environment:
-      - ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-42169}
+      - ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-42069}
       - EPISTULA_HOTKEY_PATH=/home/appuser/.bittensor/wallets/coldkey/hotkeys/hotkey
+      - EPISTULA_HOTKEY_SEED_PATH=/app/secrets/hotkey.txt
+      - EPISTULA_COLDKEY_SEED_PATH=/app/secrets/coldkey.txt
       - CALLBACK_GCS_BUCKET=${CALLBACK_GCS_BUCKET}
       - CALLBACK_GCS_PREFIX=${CALLBACK_GCS_PREFIX:-callbacks}
       - CALLBACK_GCS_CREDENTIALS=${CALLBACK_GCS_CREDENTIALS:-/app/gcs_service_account.json}
       - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcs_service_account.json}
-      - JOBRELAY_BASE_URL=${JOBRELAY_BASE_URL:-http://jobrelay:8181}
+      - JOBRELAY_BASE_URL=${JOBRELAY_BASE_URL:-https://jobrelay1738.dippy-bittensor.studio}
       - JOBRELAY_TIMEOUT_SECONDS=${JOBRELAY_TIMEOUT_SECONDS:-5}
-      - DATABASE_URL=postgresql://orchestrator:orchestrator@postgres:5432/orchestrator
+      - DATABASE_URL=${DATABASE_URL}
       - LISTEN_SYNC_BACKEND=redis
       - LISTEN_SYNC_REDIS_URL=redis://redis:6379/0
       - LISTEN_SYNC_REDIS_CHANNEL_PREFIX=listen_sync
       - LISTEN_SYNC_REDIS_TTL_SECONDS=600
+      - SS58_BASE_URL=${SS58_BASE_URL:-http://ss58:8585}
+      - SS58_TIMEOUT_SECONDS=${SS58_TIMEOUT_SECONDS:-5}
       - ENABLE_LOCAL_STUB_MINER=true
       - LOCAL_STUB_MINER_URL=http://stub-miner:${STUB_MINER_PORT:-8765}
       - LOCAL_STUB_MINER_HOTKEY=5EtM9iXMAYRsmt6aoQAoWNDX6yaBnjhmnEQhWKv8HpwkVtML
@@ -35,6 +39,7 @@ services:
       - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       - OTEL_SERVICE_NAME=orchestrator
       - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=local,provider_name=bittensor
+      - OTEL_SDK_DISABLED=true
     env_file:
       - .env
     extra_hosts:
@@ -42,8 +47,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      jobrelay:
-        condition: service_started
       redis:
         condition: service_healthy
 
@@ -58,7 +61,7 @@ services:
       - .:/app
     environment:
       - FORWARDER_PORT=${FORWARDER_PORT:-9871}
-      - FORWARDER_ORCHESTRATOR_BASE_URL=http://orchestrator-dev:${ORCHESTRATOR_PORT:-42169}
+      - FORWARDER_ORCHESTRATOR_BASE_URL=http://orchestrator-dev:${ORCHESTRATOR_PORT:-42069}
       - FORWARDER_LISTEN_AUTH_SECRET=${LISTEN_AUTH_SECRET:-orchestrator-listen-secret}
       - FORWARDER_JOB_TYPE=${FORWARDER_JOB_TYPE:-base-h100_pcie}
       - FORWARDER_TIMEOUT_SECONDS=${FORWARDER_TIMEOUT_SECONDS:-10}
@@ -68,38 +71,13 @@ services:
       orchestrator-dev:
         condition: service_started
 
-  jobrelay:
-    build:
-      context: .
-      dockerfile: jobrelay.Dockerfile
-    command: uvicorn jobrelay.app:app --host 0.0.0.0 --port 8181 --reload --reload-dir jobrelay
-    ports:
-      - "8181:8181"
-    volumes:
-      - .:/app
-      - jobrelay_data:/var/lib/jobrelay
-      - ./gcs_service_account.json:/app/gcs_service_account.json:ro
-    networks:
-      - default
-      - signoz-net
-    environment:
-      - JOBRELAY_AUTH_TOKEN=${JOBRELAY_AUTH_TOKEN:-my-secret-key-here}
-      - JOBRELAY_GCS_BUCKET=${JOBRELAY_GCS_BUCKET:-subnet11_internal}
-      - JOBRELAY_GCP_CREDENTIALS_PATH=${JOBRELAY_GCP_CREDENTIALS_PATH:-/app/gcs_service_account.json}
-      - JOBRELAY_POSTGRES_DSN=${JOBRELAY_POSTGRES_DSN:-postgresql://orchestrator:orchestrator@postgres:5432/orchestrator}
-      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcs_service_account.json}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://signoz-otel-collector:4318
-      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-      - OTEL_SERVICE_NAME=jobrelay
-      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=local,provider_name=bittensor
-    env_file:
-      - .env
-
   ss58:
     build:
       context: ./ss58_service
       dockerfile: Dockerfile
     command: python -m ss58.main
+    env_file:
+      - .env
     ports:
       - "${SS58_PORT:-8585}:${SS58_PORT:-8585}"
     volumes:
@@ -112,10 +90,23 @@ services:
       - SS58_HOST=0.0.0.0
       - SS58_PORT=${SS58_PORT:-8585}
       - SS58_RELOAD=true
+      - SS58_HEAD_PATH=${SS58_HEAD_PATH:-/var/lib/ss58/head.json}
+      - SS58_PINATA_API_BASE=${SS58_PINATA_API_BASE:-https://api.pinata.cloud}
+      - SS58_PINATA_GATEWAY_BASE=${SS58_PINATA_GATEWAY_BASE:-https://gateway.pinata.cloud/ipfs}
+      - SS58_PINATA_TIMEOUT_SECONDS=${SS58_PINATA_TIMEOUT_SECONDS:-20}
       - SS58_PINATA_JWT=${SS58_PINATA_JWT}
+      - SS58_PINATA_API_KEY=${SS58_PINATA_API_KEY}
+      - SS58_PINATA_API_SECRET=${SS58_PINATA_API_SECRET}
       - SS58_ED25519_SEED_HEX=${SS58_ED25519_SEED_HEX}
+      - SS58_REVISION=local
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${SS58_PORT:-8585}/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
   python-runner:
     build:
@@ -128,20 +119,25 @@ services:
       - ./gcs_service_account.json:/app/gcs_service_account.json:ro
     environment:
       - EPISTULA_HOTKEY_PATH=/home/appuser/.bittensor/wallets/coldkey/hotkeys/hotkey
+      - EPISTULA_HOTKEY_SEED_PATH=/app/secrets/hotkey.txt
+      - EPISTULA_COLDKEY_SEED_PATH=/app/secrets/coldkey.txt
       - CALLBACK_GCS_BUCKET=${CALLBACK_GCS_BUCKET}
       - CALLBACK_GCS_PREFIX=${CALLBACK_GCS_PREFIX:-callbacks}
       - CALLBACK_GCS_CREDENTIALS=${CALLBACK_GCS_CREDENTIALS:-/app/gcs_service_account.json}
       - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcs_service_account.json}
-      - JOBRELAY_BASE_URL=${JOBRELAY_BASE_URL:-http://jobrelay:8181}
+      - JOBRELAY_BASE_URL=${JOBRELAY_BASE_URL:-https://jobrelay1738.dippy-bittensor.studio}
       - JOBRELAY_TIMEOUT_SECONDS=${JOBRELAY_TIMEOUT_SECONDS:-5}
-      - DATABASE_URL=postgresql://orchestrator:orchestrator@postgres:5432/orchestrator
+      - DATABASE_URL=${DATABASE_URL}
       - LISTEN_SYNC_BACKEND=redis
       - LISTEN_SYNC_REDIS_URL=redis://redis:6379/0
       - LISTEN_SYNC_REDIS_CHANNEL_PREFIX=listen_sync
       - LISTEN_SYNC_REDIS_TTL_SECONDS=600
+      - SS58_BASE_URL=${SS58_BASE_URL:-http://ss58:8585}
+      - SS58_TIMEOUT_SECONDS=${SS58_TIMEOUT_SECONDS:-5}
       - ENABLE_LOCAL_STUB_MINER=true
       - LOCAL_STUB_MINER_URL=http://stub-miner:${STUB_MINER_PORT:-8765}
       - LOCAL_STUB_MINER_HOTKEY=5EtM9iXMAYRsmt6aoQAoWNDX6yaBnjhmnEQhWKv8HpwkVtML
+      - OTEL_SDK_DISABLED=true
     env_file:
       - .env
     extra_hosts:
@@ -149,8 +145,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      jobrelay:
-        condition: service_started
       redis:
         condition: service_healthy
 
@@ -199,9 +193,9 @@ services:
     ports:
       - "10069:5432"
     environment:
-      POSTGRES_DB: orchestrator
-      POSTGRES_USER: orchestrator
-      POSTGRES_PASSWORD: orchestrator
+      POSTGRES_DB: ${LOCAL_POSTGRES_DB}
+      POSTGRES_USER: ${LOCAL_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${LOCAL_POSTGRES_PASSWORD}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -212,7 +206,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  jobrelay_data:
   postgres_data:
   ss58_data:
 

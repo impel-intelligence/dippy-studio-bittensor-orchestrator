@@ -14,21 +14,21 @@ default:
 # Build and start the local dev stack
 up:
 	docker compose --file docker-compose-local.yml up -d --build
-	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-42169} (Docker)"
+	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-42069} (Docker)"
 	@echo "🧪 Stub miner proxy running at http://localhost:${STUB_MINER_PORT:-8765}"
 	@echo "   View logs: just devlogs or just orclogs"
 
 # Start local dev stack without rebuilding
 local:
 	docker compose --file docker-compose-local.yml up -d
-	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-42169} (Docker)"
+	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-42069} (Docker)"
 	@echo "🧪 Stub miner proxy running at http://localhost:${STUB_MINER_PORT:-8765}"
 	@echo "   View logs: just devlogs or just orclogs"
 
 # Rebuild and restart only the orchestrator-dev service
 local-rebuild:
 	docker compose --file docker-compose-local.yml up -d --build orchestrator-dev
-	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-42169} (Docker)"
+	@echo "🚀 Orchestrator running at http://localhost:${ORCHESTRATOR_PORT:-42069} (Docker)"
 	@echo "🧪 Stub miner proxy running at http://localhost:${STUB_MINER_PORT:-8765}"
 	@echo "   View logs: just devlogs or just orclogs"
 
@@ -37,9 +37,9 @@ local-down:
 	docker compose --file docker-compose-local.yml down
 	@echo "🛑 Local stack stopped"
 
-# Tail logs for both orchestrator and jobrelay
+# Tail logs for orchestrator and stub miner
 devlogs tail='100':
-	docker compose --file docker-compose-local.yml logs --tail={{tail}} -f orchestrator-dev jobrelay stub-miner
+	docker compose --file docker-compose-local.yml logs --tail={{tail}} -f orchestrator-dev stub-miner
 
 # Tail logs for orchestrator only
 orclogs tail='100':
@@ -89,27 +89,43 @@ python-run script:
 
 # Start prod-equivalent stack
 prod-up:
-	docker compose --file docker-compose-prod.yml up -d --build
-	@echo "🚀 Prod-equivalent stack running at http://localhost:${ORCHESTRATOR_PORT:-42169} (Docker)"
-	@echo "   View logs: just prod-logs"
+	DB_URL="${DATABASE_URL:-${PROD_DATABASE_URL:-}}"; \
+	if [ -z "$DB_URL" ]; then \
+		echo "DATABASE_URL or PROD_DATABASE_URL must be set for prod-up" >&2; \
+		exit 1; \
+	fi; \
+	ENV_ARGS="--env-file .env"; \
+	if [ -f .env.prod ]; then ENV_ARGS="$ENV_ARGS --env-file .env.prod"; fi; \
+	DATABASE_URL="$DB_URL" just db-migrate; \
+	docker compose $ENV_ARGS --file docker-compose-prod.yml up -d --build; \
+	echo "🚀 Prod-equivalent stack running at http://localhost:${ORCHESTRATOR_PORT:-42069} (Docker)"; \
+	echo "   View logs: just prod-logs"
 
 # Stop prod-equivalent stack
 prod-down:
-	docker compose --file docker-compose-prod.yml down
+	ENV_ARGS="--env-file .env"; \
+	if [ -f .env.prod ]; then ENV_ARGS="$ENV_ARGS --env-file .env.prod"; fi; \
+	docker compose $ENV_ARGS --file docker-compose-prod.yml down
 	@echo "🛑 Prod-equivalent stack stopped"
 
 # Tail logs for prod stack
 prod-logs:
-	docker compose --file docker-compose-prod.yml logs -f orchestrator jobrelay redis
+	ENV_ARGS="--env-file .env"; \
+	if [ -f .env.prod ]; then ENV_ARGS="$ENV_ARGS --env-file .env.prod"; fi; \
+	docker compose $ENV_ARGS --file docker-compose-prod.yml logs -f orchestrator redis
 
 # Restart prod-equivalent services (keeps volumes/data)
 prod-restart:
-	docker compose --file docker-compose-prod.yml restart orchestrator jobrelay forwarder redis
+	ENV_ARGS="--env-file .env"; \
+	if [ -f .env.prod ]; then ENV_ARGS="$ENV_ARGS --env-file .env.prod"; fi; \
+	docker compose $ENV_ARGS --file docker-compose-prod.yml restart orchestrator forwarder redis
 	@echo "🔁 Restarted prod stack services"
 
 # Rebuild and restart prod-equivalent services
 prod-rebuild:
-	docker compose --file docker-compose-prod.yml up -d --build orchestrator jobrelay forwarder redis
+	ENV_ARGS="--env-file .env"; \
+	if [ -f .env.prod ]; then ENV_ARGS="$ENV_ARGS --env-file .env.prod"; fi; \
+	docker compose $ENV_ARGS --file docker-compose-prod.yml up -d --build orchestrator forwarder redis
 	@echo "🛠️  Rebuilt and restarted prod stack services"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -210,25 +226,6 @@ run-audit-broadcast env='local':
 	docker compose --file "$COMPOSE_FILE" exec "$SERVICE" \
 		python -m orchestrator.workers audit-broadcast
 
-# Run all workers (metagraph + score ETL)
-run-workers env='local' hotkey='':
-	ENV_RAW="{{env}}"; \
-	if [ "${ENV_RAW#env=}" != "${ENV_RAW}" ]; then ENV_VALUE="${ENV_RAW#env=}"; else ENV_VALUE="${ENV_RAW}"; fi; \
-	if [ "${ENV_VALUE}" = "prod" ]; then \
-		COMPOSE_FILE="docker-compose-prod.yml"; \
-		SERVICE="orchestrator"; \
-	else \
-		COMPOSE_FILE="docker-compose-local.yml"; \
-		SERVICE="orchestrator-dev"; \
-	fi; \
-	if [ -n "{{hotkey}}" ]; then \
-		HOTKEY_FLAG="--hotkey {{hotkey}}"; \
-	else \
-		HOTKEY_FLAG=""; \
-	fi; \
-	docker compose --file "$COMPOSE_FILE" exec "$SERVICE" \
-		python -m orchestrator.workers all $HOTKEY_FLAG
-
 # Replay latest audit job to all miners for matching job types
 run-seed-requests env='local':
 	ENV_RAW="{{env}}"; \
@@ -290,7 +287,7 @@ integration-test args="": integration-migrate
 
 # Run functional tests against running orchestrator
 functional-tests:
-	API_BASE_URL="${API_BASE_URL:-http://localhost:${ORCHESTRATOR_PORT:-42169}}" \
+	API_BASE_URL="${API_BASE_URL:-http://localhost:${ORCHESTRATOR_PORT:-42069}}" \
 		uv run --with pytest pytest functional_tests
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -318,37 +315,3 @@ check-docker:
 # Run all checks
 check: check-env check-docker
 	@echo "\n=== All checks completed ==="
-
-# ═══════════════════════════════════════════════════════════════════════════
-# JOBRELAY UTILITIES
-# ═══════════════════════════════════════════════════════════════════════════
-
-# Execute the JobRelay CLI helper inside Docker (pass args="completed ...")
-jobrelay-cli args="--help":
-	docker compose --file docker-compose-local.yml run --rm jobrelay \
-		python -m jobrelay.cli {{args}}
-
-jobrelay-flush:
-	docker compose --file docker-compose-local.yml run --rm jobrelay \
-		python -m jobrelay.cli flush
-
-# Restore JobRelay state from GCS snapshots into the local DuckDB
-jobrelay-restore max_snapshots='' keep_existing='false':
-	set -eu; \
-	if [ -n "{{max_snapshots}}" ]; then \
-		MAX_FLAG="--max-snapshots {{max_snapshots}}"; \
-	else \
-		MAX_FLAG=""; \
-	fi; \
-	if [ "{{keep_existing}}" = "true" ]; then \
-		KEEP_FLAG="--keep-existing"; \
-	else \
-		KEEP_FLAG=""; \
-	fi; \
-	COMPOSE="docker compose --file docker-compose-local.yml"; \
-	$COMPOSE stop jobrelay >/dev/null; \
-	EXIT_CODE=0; \
-	$COMPOSE run --rm jobrelay \
-		python -m jobrelay.cli restore-snapshots $MAX_FLAG $KEEP_FLAG || EXIT_CODE=$?; \
-	$COMPOSE up -d jobrelay >/dev/null; \
-	exit $EXIT_CODE

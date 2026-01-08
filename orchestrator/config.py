@@ -78,7 +78,9 @@ class ListenSyncConfig:
         backend = (self.backend or "redis").strip().lower()
         if backend != "redis":
             raise ValueError(f"Unsupported listen sync backend: {backend}")
-        channel_prefix = (self.redis_channel_prefix or "listen_sync").strip() or "listen_sync"
+        channel_prefix = (
+            self.redis_channel_prefix or "listen_sync"
+        ).strip() or "listen_sync"
         return ListenSyncConfig(
             timeout_seconds=timeout,
             poll_interval_seconds=poll,
@@ -97,7 +99,7 @@ class ListenConfig:
 @dataclass
 class JobRelayConfig:
     enabled: bool = True
-    base_url: Optional[str] = "https://jobrelay1738.dippy-bittensor.studio"
+    base_url: Optional[str] = "https://jobrelay.example.com"
     auth_token: Optional[str] = None
     timeout_seconds: float = 5.0
 
@@ -127,6 +129,8 @@ class ScoreConfig:
     ema_half_life_seconds: float = 604_800.0
     failure_penalty_weight: float = 0.2
     lookback_days: float = 7.0
+    pending_timeout_seconds: float = 30.0
+    failure_slash_threshold: int = 3
 
     def normalized(self) -> "ScoreConfig":
         alpha = float(self.ema_alpha)
@@ -146,12 +150,20 @@ class ScoreConfig:
         lookback = float(self.lookback_days)
         if lookback < 0.0:
             lookback = 0.0
+        pending_timeout = float(self.pending_timeout_seconds)
+        if pending_timeout < 0.0:
+            pending_timeout = 0.0
+        threshold = int(self.failure_slash_threshold)
+        if threshold < 0:
+            threshold = 0
 
         return ScoreConfig(
             ema_alpha=alpha,
             ema_half_life_seconds=half_life,
             failure_penalty_weight=penalty,
             lookback_days=lookback,
+            pending_timeout_seconds=pending_timeout,
+            failure_slash_threshold=threshold,
         )
 
 
@@ -162,7 +174,9 @@ class AuditSeedConfig:
     dispatch_delay_seconds: float = 15.0
     limit: int = 10
 
-    def normalized(self, *, default_redis_url: Optional[str] = None) -> "AuditSeedConfig":
+    def normalized(
+        self, *, default_redis_url: Optional[str] = None
+    ) -> "AuditSeedConfig":
         redis_url = self.redis_url or default_redis_url
         namespace = (self.redis_namespace or "audit_seed").strip() or "audit_seed"
         delay = _maybe_float(self.dispatch_delay_seconds, 15.0)
@@ -222,7 +236,9 @@ class OrchestratorConfig:
         netuid_value = _maybe_int(subnet_data.get("netuid"), 11)
         if netuid_value is None:
             netuid_value = 11
-        network_value = str(subnet_data.get("network", "finney") or "finney").strip() or "finney"
+        network_value = (
+            str(subnet_data.get("network", "finney") or "finney").strip() or "finney"
+        )
         subnet = SubnetConfig(netuid=netuid_value, network=network_value)
 
         callback_data = data.get("callback", {}) or {}
@@ -242,7 +258,9 @@ class OrchestratorConfig:
         listen_data = data.get("listen", {}) or {}
         sync_data = listen_data.get("sync", {}) or {}
         listen_defaults = ListenSyncConfig()
-        sync_timeout = _maybe_float(sync_data.get("timeout_seconds"), listen_defaults.timeout_seconds)
+        sync_timeout = _maybe_float(
+            sync_data.get("timeout_seconds"), listen_defaults.timeout_seconds
+        )
         if sync_timeout is None:
             sync_timeout = listen_defaults.timeout_seconds
         sync_poll = _maybe_float(
@@ -251,7 +269,9 @@ class OrchestratorConfig:
         )
         if sync_poll is None:
             sync_poll = listen_defaults.poll_interval_seconds
-        backend_value = str(sync_data.get("backend", listen_defaults.backend) or listen_defaults.backend)
+        backend_value = str(
+            sync_data.get("backend", listen_defaults.backend) or listen_defaults.backend
+        )
         redis_url_value = sync_data.get("redis_url") or listen_defaults.redis_url
         ttl_value = _maybe_float(
             sync_data.get("redis_result_ttl_seconds"),
@@ -259,7 +279,9 @@ class OrchestratorConfig:
         )
         if ttl_value is None:
             ttl_value = listen_defaults.redis_result_ttl_seconds
-        prefix_value = sync_data.get("redis_channel_prefix", listen_defaults.redis_channel_prefix)
+        prefix_value = sync_data.get(
+            "redis_channel_prefix", listen_defaults.redis_channel_prefix
+        )
         listen = ListenConfig(
             sync=ListenSyncConfig(
                 timeout_seconds=sync_timeout,
@@ -282,8 +304,12 @@ class OrchestratorConfig:
             enabled_value = bool(enabled_raw)
 
         base_url_value = jobrelay_data.get("base_url", jobrelay_defaults.base_url)
-        timeout_value = jobrelay_data.get("timeout_seconds", jobrelay_defaults.timeout_seconds)
-        jobrelay_timeout = _maybe_float(timeout_value, jobrelay_defaults.timeout_seconds)
+        timeout_value = jobrelay_data.get(
+            "timeout_seconds", jobrelay_defaults.timeout_seconds
+        )
+        jobrelay_timeout = _maybe_float(
+            timeout_value, jobrelay_defaults.timeout_seconds
+        )
         if jobrelay_timeout is None:
             jobrelay_timeout = jobrelay_defaults.timeout_seconds
 
@@ -297,7 +323,9 @@ class OrchestratorConfig:
         ss58_defaults = SS58Config().normalized()
         ss58_data = data.get("ss58", {}) or {}
         ss58_base_url = ss58_data.get("base_url", ss58_defaults.base_url)
-        ss58_timeout = _maybe_float(ss58_data.get("timeout_seconds"), ss58_defaults.timeout_seconds)
+        ss58_timeout = _maybe_float(
+            ss58_data.get("timeout_seconds"), ss58_defaults.timeout_seconds
+        )
         if ss58_timeout is None or ss58_timeout <= 0.0:
             ss58_timeout = ss58_defaults.timeout_seconds
         ss58 = SS58Config(
@@ -309,7 +337,9 @@ class OrchestratorConfig:
         ema_alpha_value = _maybe_float(scores_data.get("ema_alpha"), 1.0)
         if ema_alpha_value is None:
             ema_alpha_value = 1.0
-        half_life_value = _maybe_float(scores_data.get("ema_half_life_seconds"), 604_800.0)
+        half_life_value = _maybe_float(
+            scores_data.get("ema_half_life_seconds"), 604_800.0
+        )
         if half_life_value is None:
             half_life_value = 604_800.0
         penalty_value = _maybe_float(scores_data.get("failure_penalty_weight"), 0.2)
@@ -318,17 +348,30 @@ class OrchestratorConfig:
         lookback_value = _maybe_float(scores_data.get("lookback_days"), 7.0)
         if lookback_value is None:
             lookback_value = 7.0
+        pending_timeout_value = _maybe_float(
+            scores_data.get("pending_timeout_seconds"), 30.0
+        )
+        if pending_timeout_value is None:
+            pending_timeout_value = 30.0
+        failure_slash_value = _maybe_int(
+            scores_data.get("failure_slash_threshold"), 3
+        )
+        if failure_slash_value is None:
+            failure_slash_value = 3
         scores = ScoreConfig(
             ema_alpha=ema_alpha_value,
             ema_half_life_seconds=half_life_value,
             failure_penalty_weight=penalty_value,
             lookback_days=lookback_value,
+            pending_timeout_seconds=pending_timeout_value,
+            failure_slash_threshold=failure_slash_value,
         ).normalized()
 
         audit_seed_defaults = AuditSeedConfig()
         audit_seed_data = data.get("audit_seed", {}) or {}
         audit_seed_namespace = (
-            audit_seed_data.get("redis_namespace") or audit_seed_defaults.redis_namespace
+            audit_seed_data.get("redis_namespace")
+            or audit_seed_defaults.redis_namespace
         )
         if audit_seed_namespace:
             audit_seed_namespace = audit_seed_namespace.strip()
@@ -338,7 +381,9 @@ class OrchestratorConfig:
         )
         if audit_seed_delay is None or audit_seed_delay < 0.0:
             audit_seed_delay = audit_seed_defaults.dispatch_delay_seconds
-        audit_seed_limit = _maybe_int(audit_seed_data.get("limit"), audit_seed_defaults.limit)
+        audit_seed_limit = _maybe_int(
+            audit_seed_data.get("limit"), audit_seed_defaults.limit
+        )
         if audit_seed_limit is None or audit_seed_limit <= 0:
             audit_seed_limit = audit_seed_defaults.limit
         audit_seed_redis_url = audit_seed_data.get("redis_url")
@@ -346,10 +391,12 @@ class OrchestratorConfig:
         audit_sample_size = float(data.get("audit_sample_size", 0.1))
         raw_audit_address = data.get("audit_miner_network_address")
         audit_miner_network_address = (
-            str(raw_audit_address).strip() if raw_audit_address else DEFAULT_AUDIT_MINER_NETWORK_ADDRESS
+            str(raw_audit_address).strip()
+            if raw_audit_address
+            else DEFAULT_AUDIT_MINER_NETWORK_ADDRESS
         )
         metagraph_runner_interval = float(data.get("metagraph_runner_interval", 300.0))
-        audit_target_domain = (data.get("audit_target_domain") or None)
+        audit_target_domain = data.get("audit_target_domain") or None
 
         return cls(
             database=database,
@@ -361,7 +408,8 @@ class OrchestratorConfig:
             scores=scores,
             audit_seed=AuditSeedConfig(
                 redis_url=audit_seed_redis_url or listen.sync.redis_url,
-                redis_namespace=audit_seed_namespace or audit_seed_defaults.redis_namespace,
+                redis_namespace=audit_seed_namespace
+                or audit_seed_defaults.redis_namespace,
                 dispatch_delay_seconds=audit_seed_delay,
                 limit=audit_seed_limit,
             ).normalized(default_redis_url=listen.sync.redis_url),
@@ -380,14 +428,18 @@ class OrchestratorConfig:
         if "DATABASE_MIN_CONNECTIONS" in env:
             self.database.min_connections = max(
                 1,
-                _maybe_int(env["DATABASE_MIN_CONNECTIONS"], self.database.min_connections)
+                _maybe_int(
+                    env["DATABASE_MIN_CONNECTIONS"], self.database.min_connections
+                )
                 or self.database.min_connections,
             )
 
         if "DATABASE_MAX_CONNECTIONS" in env:
             self.database.max_connections = max(
                 1,
-                _maybe_int(env["DATABASE_MAX_CONNECTIONS"], self.database.max_connections)
+                _maybe_int(
+                    env["DATABASE_MAX_CONNECTIONS"], self.database.max_connections
+                )
                 or self.database.max_connections,
             )
 
@@ -409,15 +461,21 @@ class OrchestratorConfig:
                 self.subnet.network = value
 
         if "AUDIT_SAMPLE_SIZE" in env:
-            self.audit_sample_size = _maybe_float(env["AUDIT_SAMPLE_SIZE"], self.audit_sample_size)
+            self.audit_sample_size = _maybe_float(
+                env["AUDIT_SAMPLE_SIZE"], self.audit_sample_size
+            )
         if "AUDIT_MINER_NETWORK_ADDRESS" in env:
             value = env["AUDIT_MINER_NETWORK_ADDRESS"].strip()
-            self.audit_miner_network_address = value or DEFAULT_AUDIT_MINER_NETWORK_ADDRESS
+            self.audit_miner_network_address = (
+                value or DEFAULT_AUDIT_MINER_NETWORK_ADDRESS
+            )
         if "AUDIT_TARGET_DOMAIN" in env:
             value = env["AUDIT_TARGET_DOMAIN"].strip()
             self.audit_target_domain = value or None
         if "METAGRAPH_RUN_INTERVAL" in env:
-            self.metagraph_runner_interval = _maybe_float(env["METAGRAPH_RUN_INTERVAL"], self.metagraph_runner_interval)
+            self.metagraph_runner_interval = _maybe_float(
+                env["METAGRAPH_RUN_INTERVAL"], self.metagraph_runner_interval
+            )
 
         callback_uploader = env.get("CALLBACK_UPLOADER")
         if callback_uploader:
@@ -428,8 +486,12 @@ class OrchestratorConfig:
             if self.callback.gcs.bucket:
                 self.callback.uploader = "gcs"
         if "CALLBACK_GCS_PREFIX" in env:
-            self.callback.gcs.prefix = env["CALLBACK_GCS_PREFIX"] or self.callback.gcs.prefix
-        credentials_override = env.get("CALLBACK_GCS_CREDENTIALS") or env.get("GOOGLE_APPLICATION_CREDENTIALS")
+            self.callback.gcs.prefix = (
+                env["CALLBACK_GCS_PREFIX"] or self.callback.gcs.prefix
+            )
+        credentials_override = env.get("CALLBACK_GCS_CREDENTIALS") or env.get(
+            "GOOGLE_APPLICATION_CREDENTIALS"
+        )
         if credentials_override:
             self.callback.gcs.credentials_path = Path(credentials_override)
         if "CALLBACK_URL" in env:
@@ -454,13 +516,18 @@ class OrchestratorConfig:
             if backend_override:
                 backend_value = backend_override.lower()
                 if backend_value != "redis":
-                    raise ValueError(f"Unsupported listen sync backend override: {backend_override}")
+                    raise ValueError(
+                        f"Unsupported listen sync backend override: {backend_override}"
+                    )
                 self.listen.sync.backend = backend_value
         if "LISTEN_SYNC_REDIS_URL" in env:
             url_override = env["LISTEN_SYNC_REDIS_URL"].strip()
             self.listen.sync.redis_url = url_override or None
         if "LISTEN_SYNC_REDIS_TTL_SECONDS" in env:
-            ttl_override = _maybe_float(env["LISTEN_SYNC_REDIS_TTL_SECONDS"], self.listen.sync.redis_result_ttl_seconds)
+            ttl_override = _maybe_float(
+                env["LISTEN_SYNC_REDIS_TTL_SECONDS"],
+                self.listen.sync.redis_result_ttl_seconds,
+            )
             if ttl_override is not None and ttl_override > 0.0:
                 self.listen.sync.redis_result_ttl_seconds = ttl_override
         if "LISTEN_SYNC_REDIS_CHANNEL_PREFIX" in env:
@@ -487,40 +554,67 @@ class OrchestratorConfig:
             if limit_override is not None and limit_override > 0:
                 self.audit_seed.limit = limit_override
 
-
         if "EMA_ALPHA" in env:
             alpha = _maybe_float(env["EMA_ALPHA"], self.scores.ema_alpha)
             if alpha is not None:
                 self.scores.ema_alpha = alpha
         if "EMA_HALF_LIFE_SECONDS" in env:
-            half_life = _maybe_float(env["EMA_HALF_LIFE_SECONDS"], self.scores.ema_half_life_seconds)
+            half_life = _maybe_float(
+                env["EMA_HALF_LIFE_SECONDS"], self.scores.ema_half_life_seconds
+            )
             if half_life is not None:
                 self.scores.ema_half_life_seconds = half_life
         if "FAILURE_PENALTY_WEIGHT" in env:
-            penalty = _maybe_float(env["FAILURE_PENALTY_WEIGHT"], self.scores.failure_penalty_weight)
+            penalty = _maybe_float(
+                env["FAILURE_PENALTY_WEIGHT"], self.scores.failure_penalty_weight
+            )
             if penalty is not None:
                 self.scores.failure_penalty_weight = penalty
-        lookback_override_env = env.get("SCORES_LOOKBACK_DAYS") or env.get("LOOKBACK_DAYS")
+        lookback_override_env = env.get("SCORES_LOOKBACK_DAYS") or env.get(
+            "LOOKBACK_DAYS"
+        )
         if lookback_override_env is not None:
-            lookback_override = _maybe_float(lookback_override_env, self.scores.lookback_days)
+            lookback_override = _maybe_float(
+                lookback_override_env, self.scores.lookback_days
+            )
             if lookback_override is not None:
                 self.scores.lookback_days = lookback_override
+        if "SCORES_PENDING_TIMEOUT_SECONDS" in env:
+            pending_timeout = _maybe_float(
+                env["SCORES_PENDING_TIMEOUT_SECONDS"],
+                self.scores.pending_timeout_seconds,
+            )
+            if pending_timeout is not None:
+                self.scores.pending_timeout_seconds = pending_timeout
+        if "SCORES_FAILURE_SLASH_THRESHOLD" in env:
+            slash_override = _maybe_int(
+                env["SCORES_FAILURE_SLASH_THRESHOLD"],
+                self.scores.failure_slash_threshold,
+            )
+            if slash_override is not None:
+                self.scores.failure_slash_threshold = slash_override
 
         if "SS58_BASE_URL" in env:
             base_url = env["SS58_BASE_URL"].strip()
             self.ss58.base_url = base_url or self.ss58.base_url
         if "SS58_TIMEOUT_SECONDS" in env:
-            timeout = _maybe_float(env["SS58_TIMEOUT_SECONDS"], self.ss58.timeout_seconds)
+            timeout = _maybe_float(
+                env["SS58_TIMEOUT_SECONDS"], self.ss58.timeout_seconds
+            )
             if timeout is not None and timeout > 0.0:
                 self.ss58.timeout_seconds = timeout
 
         self.scores = self.scores.normalized()
         self.listen.sync = self.listen.sync.normalized()
-        self.audit_seed = self.audit_seed.normalized(default_redis_url=self.listen.sync.redis_url)
+        self.audit_seed = self.audit_seed.normalized(
+            default_redis_url=self.listen.sync.redis_url
+        )
         self.ss58 = self.ss58.normalized()
 
 
-def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None = None) -> OrchestratorConfig:
+def load_config(
+    path: str | Path | None = None, *, env: Mapping[str, str] | None = None
+) -> OrchestratorConfig:
     env = env or os.environ
 
     candidate_paths: list[Path] = []
@@ -542,6 +636,7 @@ def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None
     config = OrchestratorConfig.from_dict(config_data)
     config.apply_env_overrides(env)
     return config
+
 
 def _maybe_float(value: Any, default: Optional[float]) -> Optional[float]:
     if value in {None, "", "None"}:

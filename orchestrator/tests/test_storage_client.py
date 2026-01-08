@@ -12,9 +12,13 @@ class _StubBlob:
         self.name = name
         self._recorder = recorder
 
-    def upload_from_string(self, content: bytes, content_type: str | None = None) -> None:
+    def upload_from_string(
+        self, content: bytes, content_type: str | None = None
+    ) -> None:
         uploads: List[Dict[str, Any]] = self._recorder.setdefault("uploads", [])
-        uploads.append({"name": self.name, "content": content, "content_type": content_type})
+        uploads.append(
+            {"name": self.name, "content": content, "content_type": content_type}
+        )
 
 
 class _StubBucket:

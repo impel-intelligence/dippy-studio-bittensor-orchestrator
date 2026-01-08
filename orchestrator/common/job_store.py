@@ -43,7 +43,6 @@ class AuditStatus(str, Enum):
     AUDIT_FAILED = "audit_failed"
 
 
-
 @dataclass
 class JobRequest:
     job_type: JobType
@@ -55,7 +54,6 @@ class JobRequest:
 class JobResponse:
     payload: Dict[str, Any]
     timestamp: float = field(default_factory=time.time)
-
 
 
 @dataclass

@@ -5,34 +5,32 @@ services:
       context: .
       dockerfile: orchestrator/orchestrator.dev.Dockerfile
     image: just-orchestrator:prod-local
-    command: python orchestrator/server.py --port ${ORCHESTRATOR_PORT:-42169}
+    command: uvicorn orchestrator.server:create_app --factory --host 0.0.0.0 --port ${ORCHESTRATOR_PORT:-42069} --workers 10
     env_file:
       - .env
+      - .env.prod
     environment:
-      - ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-42169}
+      - ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-42069}
       - EPISTULA_HOTKEY_PATH=/home/appuser/.bittensor/wallets/coldkey/hotkeys/hotkey
+      - EPISTULA_HOTKEY_SEED_PATH=${EPISTULA_HOTKEY_SEED_PATH:-/app/secrets/hotkey.txt}
+      - EPISTULA_COLDKEY_SEED_PATH=${EPISTULA_COLDKEY_SEED_PATH:-/app/secrets/coldkey.txt}
       - CALLBACK_GCS_BUCKET=${CALLBACK_GCS_BUCKET}
       - CALLBACK_GCS_PREFIX=${CALLBACK_GCS_PREFIX:-callbacks}
       - CALLBACK_GCS_CREDENTIALS=${CALLBACK_GCS_CREDENTIALS:-/app/gcs_service_account.json}
       - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcs_service_account.json}
-      - JOBRELAY_BASE_URL=${JOBRELAY_BASE_URL:-http://jobrelay:8181}
+      - JOBRELAY_BASE_URL=${JOBRELAY_BASE_URL:-https://jobrelay1738.dippy-bittensor.studio}
       - JOBRELAY_TIMEOUT_SECONDS=${JOBRELAY_TIMEOUT_SECONDS:-5}
-      - DATABASE_URL=postgresql://orchestrator:orchestrator@postgres:5432/orchestrator
+      - DATABASE_URL=${POSTGRES_URL:-${DATABASE_URL:-}}
+      - OTEL_SDK_DISABLED=true
       - LISTEN_SYNC_BACKEND=redis
       - LISTEN_SYNC_REDIS_URL=redis://redis:6379/0
       - LISTEN_SYNC_REDIS_CHANNEL_PREFIX=listen_sync
       - LISTEN_SYNC_REDIS_TTL_SECONDS=600
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://signoz-otel-collector:4318
-      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-      - OTEL_SERVICE_NAME=orchestrator
-      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,provider_name=bittensor
+      - SS58_BASE_URL=${SS58_BASE_URL:-http://ss58:8585}
+      - SS58_TIMEOUT_SECONDS=${SS58_TIMEOUT_SECONDS:-5}
     ports:
-      - "${ORCHESTRATOR_PORT:-42169}:${ORCHESTRATOR_PORT:-42169}"
+      - "${ORCHESTRATOR_PORT:-42069}:${ORCHESTRATOR_PORT:-42069}"
     depends_on:
-      postgres:
-        condition: service_healthy
-      jobrelay:
-        condition: service_started
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -41,12 +39,12 @@ services:
       - .:/app
       - ${HOME}/.bittensor:/home/appuser/.bittensor:ro
       - ${GCS_CREDENTIALS_FILE:-./gcs_service_account.json}:/app/gcs_service_account.json:ro
+      - ./secrets/hotkey.txt:/app/secrets/hotkey.txt:ro
+      - ./secrets/coldkey.txt:/app/secrets/coldkey.txt:ro
     networks:
       - default
-      - signoz-net
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "signoz-otel-collector:host-gateway"
 
   forwarder:
     container_name: forwarder-prod
@@ -59,14 +57,11 @@ services:
       - .env
     environment:
       - FORWARDER_PORT=${FORWARDER_PORT:-9871}
-      - FORWARDER_ORCHESTRATOR_BASE_URL=http://orchestrator:${ORCHESTRATOR_PORT:-42169}
+      - FORWARDER_ORCHESTRATOR_BASE_URL=http://orchestrator:${ORCHESTRATOR_PORT:-42069}
       - FORWARDER_LISTEN_AUTH_SECRET=${LISTEN_AUTH_SECRET:-orchestrator-listen-secret}
       - FORWARDER_JOB_TYPE=${FORWARDER_JOB_TYPE:-base-h100_pcie}
       - FORWARDER_TIMEOUT_SECONDS=${FORWARDER_TIMEOUT_SECONDS:-10}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://signoz-otel-collector:4318
-      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-      - OTEL_SERVICE_NAME=forwarder
-      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,provider_name=bittensor
+      - OTEL_SDK_DISABLED=true
     ports:
       - "${FORWARDER_PORT:-9871}:${FORWARDER_PORT:-9871}"
     depends_on:
@@ -75,43 +70,45 @@ services:
     restart: unless-stopped
     volumes:
       - .:/app
-    extra_hosts:
-      - "signoz-otel-collector:host-gateway"
     networks:
       - default
-      - signoz-net
 
-  jobrelay:
-    container_name: jobrelay-prod
+  ss58:
+    container_name: ss58-prod
     build:
-      context: .
-      dockerfile: jobrelay.Dockerfile
-    image: just-jobrelay:prod-local
+      context: ./ss58_service
+      dockerfile: Dockerfile
+    image: ss58-service:prod-local
+    command: python -m ss58.main
     env_file:
       - .env
+      - .env.prod
     environment:
-      - JOBRELAY_AUTH_TOKEN=${JOBRELAY_AUTH_TOKEN:-my-secret-key-here}
-      - JOBRELAY_GCS_BUCKET=${JOBRELAY_GCS_BUCKET:-subnet11_internal}
-      - JOBRELAY_GCP_CREDENTIALS_PATH=${JOBRELAY_GCP_CREDENTIALS_PATH:-/app/gcs_service_account.json}
-      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcs_service_account.json}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://signoz-otel-collector:4318
-      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-      - OTEL_SERVICE_NAME=jobrelay
-      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,provider_name=bittensor
+      - SS58_HOST=0.0.0.0
+      - SS58_PORT=${SS58_PORT:-8585}
+      - SS58_RELOAD=false
+      - SS58_HEAD_PATH=${SS58_HEAD_PATH:-/var/lib/ss58/head.json}
+      - SS58_PINATA_API_BASE=${SS58_PINATA_API_BASE:-https://api.pinata.cloud}
+      - SS58_PINATA_GATEWAY_BASE=${SS58_PINATA_GATEWAY_BASE:-https://gateway.pinata.cloud/ipfs}
+      - SS58_PINATA_TIMEOUT_SECONDS=${SS58_PINATA_TIMEOUT_SECONDS:-20}
+      - SS58_PINATA_JWT=${SS58_PINATA_JWT}
+      - SS58_PINATA_API_KEY=${SS58_PINATA_API_KEY}
+      - SS58_PINATA_API_SECRET=${SS58_PINATA_API_SECRET}
+      - SS58_ED25519_SEED_HEX=${SS58_ED25519_SEED_HEX}
+      - SS58_REVISION=${SS58_REVISION:-prod-local}
     ports:
-      - "8181:8181"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
+      - "${SS58_PORT:-8585}:${SS58_PORT:-8585}"
     volumes:
-      - jobrelay_data:/var/lib/jobrelay
-      - ${GCS_CREDENTIALS_FILE:-./gcs_service_account.json}:/app/gcs_service_account.json:ro
-    extra_hosts:
-      - "signoz-otel-collector:host-gateway"
+      - ./ss58_service:/app
+      - ss58_data:/var/lib/ss58
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${SS58_PORT:-8585}/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
     networks:
       - default
-      - signoz-net
 
   redis:
     image: redis:7-alpine
@@ -125,29 +122,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  postgres:
-    image: postgres:18
-    container_name: orchestrator-prod-postgres
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-orchestrator}
-      POSTGRES_USER: ${POSTGRES_USER:-orchestrator}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orchestrator}
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    ports:
-      - "${POSTGRES_HOST_PORT:-10069}:5432"
-    restart: unless-stopped
-    volumes:
-      - postgres_data:/var/lib/postgresql
-
 volumes:
   orchestrator_data:
-  jobrelay_data:
-  postgres_data:
-
-networks:
-  signoz-net:
-    external: true
+  ss58_data:

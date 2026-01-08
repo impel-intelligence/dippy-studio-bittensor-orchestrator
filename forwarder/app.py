@@ -26,15 +26,25 @@ def _configure_opentelemetry(app: FastAPI) -> None:
     global _OTEL_CONFIGURED
     if _OTEL_CONFIGURED:
         return
-    if os.getenv("OTEL_SDK_DISABLED", "").strip().lower() in {"1", "true", "yes", "y", "on"}:
+    if os.getenv("OTEL_SDK_DISABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }:
         LOGGER.info("OpenTelemetry disabled via OTEL_SDK_DISABLED")
         return
     try:
         from opentelemetry import metrics, trace
         from opentelemetry._logs import set_logger_provider
         from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
-        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+            OTLPMetricExporter,
+        )
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
         from opentelemetry.instrumentation.logging import LoggingInstrumentor
@@ -49,10 +59,20 @@ def _configure_opentelemetry(app: FastAPI) -> None:
         LOGGER.warning("OpenTelemetry not configured (missing packages): %s", exc)
         return
 
-    base_otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318").rstrip("/")
-    traces_endpoint = os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or f"{base_otlp_endpoint}/v1/traces"
-    metrics_endpoint = os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") or f"{base_otlp_endpoint}/v1/metrics"
-    logs_endpoint = os.getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") or f"{base_otlp_endpoint}/v1/logs"
+    base_otlp_endpoint = os.getenv(
+        "OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318"
+    ).rstrip("/")
+    traces_endpoint = (
+        os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        or f"{base_otlp_endpoint}/v1/traces"
+    )
+    metrics_endpoint = (
+        os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+        or f"{base_otlp_endpoint}/v1/metrics"
+    )
+    logs_endpoint = (
+        os.getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") or f"{base_otlp_endpoint}/v1/logs"
+    )
 
     # Parse OTEL_RESOURCE_ATTRIBUTES for additional resource attributes
     resource_attrs = {"service.name": os.getenv("OTEL_SERVICE_NAME", "forwarder")}
@@ -67,7 +87,9 @@ def _configure_opentelemetry(app: FastAPI) -> None:
 
     # 1. Configure Tracing
     tracer_provider = TracerProvider(resource=resource)
-    tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=traces_endpoint)))
+    tracer_provider.add_span_processor(
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=traces_endpoint))
+    )
     trace.set_tracer_provider(tracer_provider)
 
     # 2. Configure Metrics
@@ -89,12 +111,12 @@ def _configure_opentelemetry(app: FastAPI) -> None:
     LoggingInstrumentor().instrument(set_logging_format=True)
 
     # 5. Create OTEL handler that exports logs with trace context
-    otel_logging_handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
+    otel_logging_handler = LoggingHandler(
+        level=logging.NOTSET, logger_provider=logger_provider
+    )
 
     # 6. Create console handler with trace context format
-    console_format = (
-        "%(asctime)s %(levelname)s [%(name)s] [trace_id=%(otelTraceID)s span_id=%(otelSpanID)s] - %(message)s"
-    )
+    console_format = "%(asctime)s %(levelname)s [%(name)s] [trace_id=%(otelTraceID)s span_id=%(otelSpanID)s] - %(message)s"
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter(console_format))
 
@@ -106,7 +128,13 @@ def _configure_opentelemetry(app: FastAPI) -> None:
     root_logger.addHandler(otel_logging_handler)
 
     # 8. Configure specific loggers
-    for logger_name in ("forwarder", "forwarder.app", "uvicorn", "uvicorn.error", "uvicorn.access"):
+    for logger_name in (
+        "forwarder",
+        "forwarder.app",
+        "uvicorn",
+        "uvicorn.error",
+        "uvicorn.access",
+    ):
         lgr = logging.getLogger(logger_name)
         lgr.handlers.clear()
         lgr.addHandler(console_handler)
@@ -132,12 +160,14 @@ def _configure_opentelemetry(app: FastAPI) -> None:
 
 DEFAULT_LISTEN_SECRET = "orchestrator-listen-secret"
 DEFAULT_JOB_TYPE = "base-h100_pcie"
-DEFAULT_ORCHESTRATOR_URL = "http://orchestrator:42169"
+DEFAULT_ORCHESTRATOR_URL = "http://orchestrator:42069"
 
 
 class Settings(BaseModel):
     orchestrator_base_url: str = Field(default=DEFAULT_ORCHESTRATOR_URL)
-    listen_auth_secret: str = Field(default=DEFAULT_LISTEN_SECRET, min_length=1, max_length=255)
+    listen_auth_secret: str = Field(
+        default=DEFAULT_LISTEN_SECRET, min_length=1, max_length=255
+    )
     job_type: str = Field(default=DEFAULT_JOB_TYPE, min_length=1, max_length=255)
     request_timeout_seconds: float = Field(default=10.0, gt=0)
 
@@ -153,7 +183,9 @@ class Settings(BaseModel):
                 fallback=os.getenv("LISTEN_AUTH_SECRET", DEFAULT_LISTEN_SECRET),
             ),
             job_type=_string_env("FORWARDER_JOB_TYPE", fallback=DEFAULT_JOB_TYPE),
-            request_timeout_seconds=_float_env("FORWARDER_TIMEOUT_SECONDS", fallback=10.0),
+            request_timeout_seconds=_float_env(
+                "FORWARDER_TIMEOUT_SECONDS", fallback=10.0
+            ),
         )
 
 
@@ -173,7 +205,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
-        app.state.http_client = httpx.AsyncClient(timeout=settings.request_timeout_seconds)
+        app.state.http_client = httpx.AsyncClient(
+            timeout=settings.request_timeout_seconds
+        )
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:

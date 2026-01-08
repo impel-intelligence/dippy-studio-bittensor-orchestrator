@@ -17,7 +17,15 @@ class _StubJobService:
         self.prepared: list[str] = []
         self.dispatched: list[str] = []
 
-    async def create_job(self, *, job_type: JobType, payload: dict[str, object], hotkey: str, job_id=None):
+    async def create_job(
+        self,
+        *,
+        job_type: JobType,
+        payload: dict[str, object],
+        hotkey: str,
+        job_id=None,
+        source: str | None = None,
+    ):
         job = SimpleNamespace(
             job_id=uuid7(),
             callback_secret="secret",
@@ -83,7 +91,9 @@ def _make_service(default_callback_url: str | None = None) -> ListenService:
     )
 
 
-def _job(job_type: JobType, payload: dict[str, object] | None = None) -> SimpleNamespace:
+def _job(
+    job_type: JobType, payload: dict[str, object] | None = None
+) -> SimpleNamespace:
     request_payload = {"callback_url": "https://callback.example"}
     if payload:
         request_payload.update(payload)
@@ -103,7 +113,9 @@ def test_apply_listen_payload_overrides_caps_kontext_steps() -> None:
     listen_service = _make_service()
     payload = {"callback_url": "https://callback.example", "num_inference_steps": 30}
 
-    updated = listen_service._apply_listen_payload_overrides(JobType.FLUX_KONTEXT, payload)
+    updated = listen_service._apply_listen_payload_overrides(
+        JobType.FLUX_KONTEXT, payload
+    )
 
     assert updated["num_inference_steps"] == 10
     assert payload["num_inference_steps"] == 30
@@ -113,7 +125,9 @@ def test_apply_listen_payload_overrides_respects_existing_cap() -> None:
     listen_service = _make_service()
     payload = {"callback_url": "https://callback.example", "num_inference_steps": 8}
 
-    updated = listen_service._apply_listen_payload_overrides(JobType.FLUX_KONTEXT, payload)
+    updated = listen_service._apply_listen_payload_overrides(
+        JobType.FLUX_KONTEXT, payload
+    )
 
     assert updated["num_inference_steps"] == 8
 

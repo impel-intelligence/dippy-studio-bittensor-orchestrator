@@ -113,7 +113,9 @@ def test_jobs_to_score_persists_ema_fields(database_service: PostgresClient) -> 
     assert stored is not None
     payload = stored.model_dump()
 
-    assert payload["ema_score"] == pytest.approx(expected_payload["ema_score"], rel=1e-5)
+    assert payload["ema_score"] == pytest.approx(
+        expected_payload["ema_score"], rel=1e-5
+    )
     assert payload["scores"] == pytest.approx(expected_payload["scores"], rel=1e-5)
     assert payload["success_count"] == 1
     assert payload["failure_count"] == 0
@@ -122,7 +124,9 @@ def test_jobs_to_score_persists_ema_fields(database_service: PostgresClient) -> 
     assert payload.get("ema_last_update_at") is not None
 
     db_payload = _decode_scores_payload(database_service, hotkey)
-    assert db_payload["ema_score"] == pytest.approx(expected_payload["ema_score"], rel=1e-5)
+    assert db_payload["ema_score"] == pytest.approx(
+        expected_payload["ema_score"], rel=1e-5
+    )
     assert db_payload["scores"] == pytest.approx(expected_payload["scores"], rel=1e-5)
     assert db_payload["success_count"] == 1
     assert db_payload["failure_count"] == 0
@@ -180,10 +184,16 @@ def test_failure_penalty_with_existing_record(database_service: PostgresClient) 
     decay_half_life = payload["decay_half_life_seconds"]
     success_at = datetime.fromisoformat(success_job["completed_at"])
     failure_at = datetime.fromisoformat(failure_job["completed_at"])
-    decay_before_failure = 0.5 ** ((failure_at - success_at).total_seconds() / decay_half_life)
-    decay_after_failure = 0.5 ** ((reference_time - failure_at).total_seconds() / decay_half_life)
+    decay_before_failure = 0.5 ** (
+        (failure_at - success_at).total_seconds() / decay_half_life
+    )
+    decay_after_failure = 0.5 ** (
+        (reference_time - failure_at).total_seconds() / decay_half_life
+    )
     raw_score = job_to_weighted_score(success_job)
-    expected_score = raw_score * decay_before_failure * penalty_factor * decay_after_failure
+    expected_score = (
+        raw_score * decay_before_failure * penalty_factor * decay_after_failure
+    )
     assert payload["scores"] == pytest.approx(expected_score, rel=1e-5)
     assert payload["ema_score"] == pytest.approx(expected_score, rel=1e-5)
 
@@ -197,7 +207,9 @@ def test_failure_penalty_with_existing_record(database_service: PostgresClient) 
 
 
 @pytest.mark.integration
-def test_last_update_recovers_from_persisted_state(database_service: PostgresClient) -> None:
+def test_last_update_recovers_from_persisted_state(
+    database_service: PostgresClient,
+) -> None:
     score_service = ScoreService(database_service)
     hotkey = "hk-last-update"
     event_time = datetime.now(timezone.utc)

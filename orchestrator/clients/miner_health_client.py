@@ -38,7 +38,11 @@ class MinerHealthClient:
             with urlopen(req, timeout=10) as response:  # noqa: S310 - controlled URL
                 return response.status == 200
         except (URLError, HTTPError, Exception) as error:
-            logger.debug("miner_health.network_unreachable address=%s error=%s", address_candidate, error)
+            logger.debug(
+                "miner_health.network_unreachable address=%s error=%s",
+                address_candidate,
+                error,
+            )
             return False
 
     def fetch_capacity(
@@ -63,7 +67,11 @@ class MinerHealthClient:
                 timeout=10,
             )
         except (URLError, HTTPError, Exception) as error:
-            log.warning("miner_health.capacity_fetch_failed url=%s error=%s", capacity_url, error)
+            log.warning(
+                "miner_health.capacity_fetch_failed url=%s error=%s",
+                capacity_url,
+                error,
+            )
             return None, False
 
         if status_code != 200:

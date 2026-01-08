@@ -65,7 +65,9 @@ def verify_signature(public_hex: str, data: EntryData, signature_hex: str) -> No
         raise ValueError(f"Invalid signature encoding: {exc}")
 
     try:
-        pub = bytes.fromhex(public_hex[2:] if public_hex.startswith("0x") else public_hex)
+        pub = bytes.fromhex(
+            public_hex[2:] if public_hex.startswith("0x") else public_hex
+        )
         vk = nacl.signing.VerifyKey(pub)
         vk.verify(canonical_data_bytes(data), signature)
     except BadSignatureError as exc:

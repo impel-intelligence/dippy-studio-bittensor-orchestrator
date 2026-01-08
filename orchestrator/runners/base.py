@@ -12,9 +12,13 @@ ResultT = TypeVar("ResultT")
 class InstrumentedRunner(Generic[ResultT]):
     """Shared runner plumbing to log lifecycle and duration."""
 
-    def __init__(self, *, name: str, logger: StructuredLogger | logging.Logger | None = None) -> None:
+    def __init__(
+        self, *, name: str, logger: StructuredLogger | logging.Logger | None = None
+    ) -> None:
         self._name = name
-        self._logger: StructuredLogger | logging.Logger = logger if logger is not None else logging.getLogger(__name__)
+        self._logger: StructuredLogger | logging.Logger = (
+            logger if logger is not None else logging.getLogger(__name__)
+        )
 
     async def execute(self) -> ResultT | None:
         start_fields = {**self._start_fields()}
@@ -43,14 +47,20 @@ class InstrumentedRunner(Generic[ResultT]):
     def _start_fields(self) -> dict[str, Any]:
         return {}
 
-    def _complete_fields(self, result: ResultT | None, start_fields: dict[str, Any]) -> dict[str, Any]:
+    def _complete_fields(
+        self, result: ResultT | None, start_fields: dict[str, Any]
+    ) -> dict[str, Any]:
         status = "success" if result is not None else "skipped"
         return {**start_fields, "status": status}
 
-    def _complete_level(self, result: ResultT | None, start_fields: dict[str, Any]) -> str:  # noqa: ARG002
+    def _complete_level(
+        self, result: ResultT | None, start_fields: dict[str, Any]
+    ) -> str:  # noqa: ARG002
         return "info"
 
-    def _error_fields(self, exc: Exception, start_fields: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+    def _error_fields(
+        self, exc: Exception, start_fields: dict[str, Any]
+    ) -> dict[str, Any]:  # noqa: ARG002
         return {**start_fields, "error": str(exc)}
 
     def _duration_ms(self, started_at: float) -> int:

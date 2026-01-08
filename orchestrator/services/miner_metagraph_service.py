@@ -16,7 +16,7 @@ from sn_uuid import uuid7
 PLACEHOLDER_MINER = Miner(
     uid=74,
     valid=True,
-    network_address="https://tmp-test.dippy-bittensor-subnet.com",
+    network_address="https://placeholder.miner.example.com",
     alpha_stake=100000,
     capacity={},
     hotkey="5EtM9iXMAYRsmt6aoQAoWNDX6yaBnjhmnEQhWKv8HpwkVtML",
@@ -44,7 +44,9 @@ class MinerMetagraphService:
             self._repository,
             epistula_client=epistula_client,
         )
-        self._selection_service = selection_service or MinerSelectionService(self._repository)
+        self._selection_service = selection_service or MinerSelectionService(
+            self._repository
+        )
         self._last_update: Optional[datetime] = None
         self._last_block: Optional[int] = None
         self._logger = logging.getLogger(__name__)

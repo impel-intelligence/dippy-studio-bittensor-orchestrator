@@ -34,4 +34,4 @@ RUN groupadd --gid 1000 appuser && \
 
 USER appuser
 
-CMD ["sh", "-c", "uvicorn orchestrator.server:create_app --host 0.0.0.0 --port ${ORCHESTRATOR_PORT:-42169}"]
+CMD ["sh", "-c", "uvicorn orchestrator.server:create_app --host 0.0.0.0 --port ${ORCHESTRATOR_PORT:-42069}"]

@@ -6,7 +6,13 @@ import pytest
 from sn_uuid import uuid7
 
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient
-from orchestrator.common.job_store import Job, JobRequest, JobResponse, JobStatus, JobType
+from orchestrator.common.job_store import (
+    Job,
+    JobRequest,
+    JobResponse,
+    JobStatus,
+    JobType,
+)
 from orchestrator.services.job_service import (
     JobService,
     JobWaitCancelledError,
@@ -24,7 +30,9 @@ class FakeJobService(JobService):
         self._statuses = statuses[:]
         self._cursor = 0
         self._job = Job(
-            job_request=JobRequest(job_type=JobType.GENERATE, payload={"prompt": "test"}),
+            job_request=JobRequest(
+                job_type=JobType.GENERATE, payload={"prompt": "test"}
+            ),
             hotkey="test-hotkey",
         )
 

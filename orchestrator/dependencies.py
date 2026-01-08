@@ -13,7 +13,7 @@ from orchestrator.common.epistula_client import EpistulaClient
 from orchestrator.common.server_context import ServerContext
 from orchestrator.common.structured_logging import StructuredLogger
 from orchestrator.config import OrchestratorConfig
-from orchestrator.repositories import AuditFailureRepository
+from orchestrator.repositories import AuditRepository
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.services.callback_service import CallbackService
 from orchestrator.services.health_service import HealthService
@@ -30,7 +30,7 @@ class DependencyRegistry:
     database_service: Optional[PostgresClient] = None
     server_context: Optional[ServerContext] = None
     callback_service: Optional[CallbackService] = None
-    audit_failure_repository: Optional[AuditFailureRepository] = None
+    audit_repository: Optional[AuditRepository] = None
     job_relay_client: Optional[BaseJobRelayClient] = None
     config: Optional[OrchestratorConfig] = None
     subnet_state_service: Optional[SubnetStateClient] = None
@@ -58,7 +58,7 @@ def set_dependencies(
     database_service: Optional[PostgresClient] = None,
     server_context: Optional[ServerContext] = None,
     callback_service: Optional[CallbackService] = None,
-    audit_failure_repository: Optional[AuditFailureRepository] = None,
+    audit_repository: Optional[AuditRepository] = None,
     job_service: Optional[JobService] = None,
     job_relay_client: BaseJobRelayClient,
     config: Optional[OrchestratorConfig] = None,
@@ -78,8 +78,8 @@ def set_dependencies(
         _registry.server_context = server_context
     if callback_service is not None:
         _registry.callback_service = callback_service
-    if audit_failure_repository is not None:
-        _registry.audit_failure_repository = audit_failure_repository
+    if audit_repository is not None:
+        _registry.audit_repository = audit_repository
     _registry.job_relay_client = job_relay_client
     if config is not None:
         _registry.config = config
@@ -132,8 +132,10 @@ def get_subnet_state_service() -> SubnetStateClient:
 def get_score_service() -> ScoreService:
     return _require("score_service", "ScoreService not initialized")  # type: ignore[return-value]
 
+
 def get_ss58_client() -> SS58Client:
     return _require("ss58_client", "SS58 client not initialized")  # type: ignore[return-value]
+
 
 def get_sync_callback_waiter() -> SyncCallbackWaiter:
     return _require("sync_callback_waiter", "Sync callback waiter not initialized")  # type: ignore[return-value]
@@ -160,8 +162,9 @@ def get_callback_service(
 def get_job_relay_client() -> BaseJobRelayClient:
     return _require("job_relay_client", "Job relay client not initialized")  # type: ignore[return-value]
 
-def get_audit_failure_repository() -> AuditFailureRepository:
-    return _require("audit_failure_repository", "Audit failure repository not initialized")  # type: ignore[return-value]
+
+def get_audit_repository() -> AuditRepository:
+    return _require("audit_repository", "Audit repository not initialized")  # type: ignore[return-value]
 
 
 def get_job_service(
@@ -189,4 +192,4 @@ def get_listen_service(
 
 
 def get_health_service() -> HealthService:
-    return HealthService() 
+    return HealthService()

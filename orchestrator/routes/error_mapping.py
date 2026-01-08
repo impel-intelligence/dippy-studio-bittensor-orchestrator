@@ -42,7 +42,9 @@ def raise_listen_service_error(exc: ListenServiceError) -> NoReturn:
 
 
 def raise_callback_service_error(exc: CallbackServiceError) -> NoReturn:
-    if isinstance(exc, (CallbackValidationError, CallbackImageError, CallbackSecretMissing)):
+    if isinstance(
+        exc, (CallbackValidationError, CallbackImageError, CallbackSecretMissing)
+    ):
         status_code = status.HTTP_400_BAD_REQUEST
     elif isinstance(exc, CallbackSecretMismatch):
         status_code = status.HTTP_403_FORBIDDEN

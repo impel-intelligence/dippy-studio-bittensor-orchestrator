@@ -239,7 +239,9 @@ def create_internal_router() -> APIRouter:
             },
         )
 
-    @router.get("/miners", response_model=MinerListResponse, status_code=status.HTTP_200_OK)
+    @router.get(
+        "/miners", response_model=MinerListResponse, status_code=status.HTTP_200_OK
+    )
     async def list_miners(
         client: MinerMetagraphService = Depends(get_miner_metagraph_service),
     ) -> MinerListResponse:
@@ -255,7 +257,8 @@ def create_internal_router() -> APIRouter:
     ) -> MinerCapacityResponse:
         state = client.dump_full_state()
         capacities: Dict[str, Dict[str, bool]] = {
-            hotkey: dict(getattr(miner, "capacity", {}) or {}) for hotkey, miner in state.items()
+            hotkey: dict(getattr(miner, "capacity", {}) or {})
+            for hotkey, miner in state.items()
         }
         last_update_dt = client.last_update()
         return MinerCapacityResponse(
@@ -275,7 +278,9 @@ def create_internal_router() -> APIRouter:
     ) -> Miner:
         miner = client.get_miner(hotkey)
         if miner is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Miner not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Miner not found"
+            )
         return miner
 
     @router.post(
@@ -290,7 +295,9 @@ def create_internal_router() -> APIRouter:
         try:
             miner = client.upsert_miner(request.to_miner())
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
         return miner
 
     @router.put(
@@ -306,7 +313,9 @@ def create_internal_router() -> APIRouter:
         try:
             miner = client.upsert_miner(request.to_miner(hotkey_override=hotkey))
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
         return miner
 
     @router.delete(
@@ -319,7 +328,9 @@ def create_internal_router() -> APIRouter:
         client: MinerMetagraphService = Depends(get_miner_metagraph_service),
     ) -> MinerDeleteResponse:
         if not client.delete_miner(hotkey):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Miner not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Miner not found"
+            )
         return MinerDeleteResponse(status="deleted", hotkey=hotkey)
 
     async def _collect_and_persist_scores(
@@ -358,12 +369,18 @@ def create_internal_router() -> APIRouter:
                 normalized.append(item)
             return normalized
 
-        union_hotkeys = set(jobs_by_hotkey.keys()) | set(miner_state.keys()) | set(stored_scores.keys())
+        union_hotkeys = (
+            set(jobs_by_hotkey.keys())
+            | set(miner_state.keys())
+            | set(stored_scores.keys())
+        )
         normalized_hotkeys = _normalize(union_hotkeys)
         for hotkey in normalized_hotkeys:
             jobs_by_hotkey.setdefault(hotkey, [])
 
-        existing_records = {hk: stored_scores[hk] for hk in normalized_hotkeys if hk in stored_scores}
+        existing_records = {
+            hk: stored_scores[hk] for hk in normalized_hotkeys if hk in stored_scores
+        }
 
         fresh_scores = score_service.jobs_to_score(
             jobs_by_hotkey,
@@ -376,7 +393,9 @@ def create_internal_router() -> APIRouter:
         for hotkey in normalized_hotkeys:
             jobs = jobs_by_hotkey.get(hotkey, [])
             completed_jobs_count = sum(
-                1 for job in jobs if ScoreService._is_completed_job(job)  # noqa: SLF001
+                1
+                for job in jobs
+                if ScoreService._is_completed_job(job)  # noqa: SLF001
             )
             score_record = fresh_scores.get(hotkey) or ScoreRecord(
                 scores=0.0,
@@ -393,9 +412,13 @@ def create_internal_router() -> APIRouter:
             try:
                 persisted = score_service.update_scores(fresh_scores)
                 if not persisted:
-                    logger.warning("raw_dump.update_scores_failed hotkeys=%s", len(fresh_scores))
+                    logger.warning(
+                        "raw_dump.update_scores_failed hotkeys=%s", len(fresh_scores)
+                    )
             except Exception:  # noqa: BLE001
-                logger.exception("raw_dump.update_scores_exception hotkeys=%s", len(fresh_scores))
+                logger.exception(
+                    "raw_dump.update_scores_exception hotkeys=%s", len(fresh_scores)
+                )
 
         return snapshot
 

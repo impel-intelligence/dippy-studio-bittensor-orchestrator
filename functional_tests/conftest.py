@@ -6,6 +6,8 @@ from typing import Generator, Optional, cast
 import pytest
 
 from .client import ApiClient
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:  # noqa: D401
     """Register custom command-line options for functional tests."""
 
@@ -15,6 +17,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:  # noqa: D401
         default=os.getenv("API_BASE_URL", "http://localhost:8000"),
         help="Base URL for the API under test (default: env API_BASE_URL or http://localhost:8000)",
     )
+
 
 @pytest.fixture(scope="session")
 def base_url(request: pytest.FixtureRequest) -> str:  # noqa: D401

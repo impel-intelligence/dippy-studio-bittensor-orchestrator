@@ -6,7 +6,18 @@ import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
+from uuid import UUID
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    TYPE_CHECKING,
+)
 
 from psycopg.types.json import Json
 
@@ -20,7 +31,7 @@ except ImportError:
 from orchestrator.clients.database import PostgresClient
 from orchestrator.clients.jobrelay_client import BaseJobRelayClient
 from orchestrator.clients.ss58_client import SS58Client
-from orchestrator.common.datetime import ensure_aware, parse_datetime
+from orchestrator.common.datetime import ensure_aware, parse_datetime, parse_timestamp
 from orchestrator.common.model_utils import dump_model, validate_model
 from orchestrator.domain.miner import Miner
 from orchestrator.schemas.scores import ScorePayload, ScoreValue, ScoresResponse
@@ -49,6 +60,7 @@ class ScoreRecord(BaseModel):
     if ConfigDict is not None:  # type: ignore[truthy-bool]
         model_config = ConfigDict(extra="allow")  # type: ignore[assignment]
     else:
+
         class Config:
             extra = "allow"
 
@@ -91,7 +103,7 @@ class ScoreRepository:
             cur.execute("SELECT scores FROM miners WHERE scores IS NOT NULL")
             rows = cur.fetchall()
 
-        for payload, in rows:
+        for (payload,) in rows:
             try:
                 self._payload_to_record(payload)
             except Exception as exc:  # noqa: BLE001
@@ -106,7 +118,9 @@ class ScoreRepository:
         if not records:
             return
 
-        prepared = [self._prepare_row(hotkey, value) for hotkey, value in records.items()]
+        prepared = [
+            self._prepare_row(hotkey, value) for hotkey, value in records.items()
+        ]
         if not prepared:
             return
 
@@ -121,7 +135,9 @@ class ScoreRepository:
             )
         self._last_update = datetime.now(timezone.utc)
 
-    def replace_all(self, records: Mapping[str, Mapping[str, Any] | ScoreRecord]) -> None:
+    def replace_all(
+        self, records: Mapping[str, Mapping[str, Any] | ScoreRecord]
+    ) -> None:
         with self._database_service.cursor() as cur:
             cur.execute("UPDATE miners SET scores = NULL")
         if records:
@@ -175,7 +191,9 @@ class ScoreRepository:
                 """
             )
 
-    def _prepare_row(self, hotkey: str, value: Mapping[str, Any] | ScoreRecord) -> Tuple[str, Json, Json]:
+    def _prepare_row(
+        self, hotkey: str, value: Mapping[str, Any] | ScoreRecord
+    ) -> Tuple[str, Json, Json]:
         record = self._coerce_record(value)
         return hotkey, Json({}), Json(self._record_to_payload(record))
 
@@ -253,6 +271,22 @@ class ScoreRepository:
         return None
 
 
+_DEFAULT_PENDING_TIMEOUT_SECONDS = 30.0
+_DEFAULT_FAILURE_SLASH_THRESHOLD = 3
+
+
+def _normalize_slash_threshold(value: float | int | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        threshold = int(value)
+    except (TypeError, ValueError):
+        return None
+    if threshold <= 0:
+        return None
+    return threshold
+
+
 class ScoreEngine:
     """Coordinate score collection and persistence."""
 
@@ -273,6 +307,8 @@ class ScoreEngine:
         score_fn: Callable[[Mapping[str, Any]], float] = job_to_weighted_score,
         job_filter: Callable[[Mapping[str, Any]], bool] | None = None,
         lookback_days: float | int | None = 7,
+        pending_timeout_seconds: float | int | None = _DEFAULT_PENDING_TIMEOUT_SECONDS,
+        failure_slash_threshold: float | int | None = _DEFAULT_FAILURE_SLASH_THRESHOLD,
     ) -> None:
         self._repository = repository
         self._job_service = job_service
@@ -281,10 +317,16 @@ class ScoreEngine:
         self._netuid = netuid
         self._network = network
         self._ss58_client = ss58_client
-        self._fetch_concurrency = max(1, int(fetch_concurrency)) if fetch_concurrency else 1
+        self._fetch_concurrency = (
+            max(1, int(fetch_concurrency)) if fetch_concurrency else 1
+        )
         self._score_settings = (score_settings or ScoreSettings()).normalized()
         self._score_fn = score_fn
         self._job_filter = job_filter
+        self._pending_timeout_seconds = self._normalize_timeout(pending_timeout_seconds)
+        self._failure_slash_threshold = _normalize_slash_threshold(
+            failure_slash_threshold
+        )
         self._lookback_days: float | None = None
         self._lookback_window: timedelta | None = None
         if lookback_days is not None:
@@ -312,8 +354,199 @@ class ScoreEngine:
         if network is not None:
             self._network = network
 
-    def set_miner_metagraph_service(self, service: MinerMetagraphService | None) -> None:
+    def set_miner_metagraph_service(
+        self, service: MinerMetagraphService | None
+    ) -> None:
         self._miner_metagraph_service = service
+
+    @staticmethod
+    def _normalize_timeout(value: float | int | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError):
+            return None
+        if normalized <= 0.0:
+            return None
+        return normalized
+
+    @staticmethod
+    def _parse_job_id(value: Any) -> UUID | None:
+        if isinstance(value, UUID):
+            return value
+        if isinstance(value, str) and value:
+            try:
+                return UUID(value)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _coerce_job_datetime(value: Any) -> datetime | None:
+        parsed = parse_datetime(value)
+        if parsed is not None:
+            return parsed
+        timestamp = parse_timestamp(value)
+        if timestamp is None:
+            return None
+        try:
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError, TypeError):
+            return None
+
+    def _pending_job_start(self, job: Mapping[str, Any]) -> datetime | None:
+        for field in (
+            "dispatched_at",
+            "miner_received_at",
+            "prepared_at",
+            "creation_timestamp",
+        ):
+            parsed = self._coerce_job_datetime(job.get(field))
+            if parsed is not None:
+                return parsed
+        return None
+
+    async def _append_failure_bans(
+        self, hotkeys: set[str], *, banned_hotkeys: set[str]
+    ) -> set[str]:
+        if not hotkeys:
+            return set()
+        client = getattr(self, "_ss58_client", None)
+        if client is None:
+            logger.warning(
+                "score_engine.failure_slash.ss58_missing count=%s",
+                len(hotkeys),
+            )
+            return set()
+        if getattr(client, "enabled", True) is False:
+            logger.info(
+                "score_engine.failure_slash.ss58_disabled count=%s",
+                len(hotkeys),
+            )
+            return set()
+
+        to_add = sorted(set(hotkeys) - set(banned_hotkeys))
+        if not to_add:
+            return set()
+        try:
+            ok = await client.append_addresses(to_add)
+        except Exception as exc:  # pragma: no cover - defensive network guard
+            logger.warning(
+                "score_engine.failure_slash.append_failed count=%s error=%s",
+                len(to_add),
+                exc,
+            )
+            return set()
+        if not ok:
+            logger.warning(
+                "score_engine.failure_slash.append_rejected count=%s",
+                len(to_add),
+            )
+            return set()
+        logger.info(
+            "score_engine.failure_slash.appended count=%s",
+            len(to_add),
+        )
+        return set(to_add)
+
+    async def _commit_pending_timeouts(
+        self,
+        job_relay: BaseJobRelayClient,
+        updates: Sequence[tuple[UUID, Mapping[str, Any]]],
+    ) -> None:
+        async def _update(job_id: UUID, payload: Mapping[str, Any]) -> None:
+            try:
+                await job_relay.update_job(job_id, dict(payload))
+            except Exception as exc:  # pragma: no cover - network guard
+                logger.warning(
+                    "score_engine.pending_timeout_update_failed job_id=%s",
+                    job_id,
+                    exc_info=exc,
+                )
+
+        tasks = [_update(job_id, payload) for job_id, payload in updates]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _apply_pending_timeouts(
+        self,
+        jobs: Sequence[Mapping[str, Any]],
+        *,
+        reference_time: datetime,
+        job_relay: BaseJobRelayClient,
+    ) -> list[Mapping[str, Any]]:
+        timeout_seconds = self._pending_timeout_seconds
+        reference = ensure_aware(reference_time)
+        updates: list[tuple[UUID, Mapping[str, Any]]] = []
+        updated_jobs: list[Mapping[str, Any]] = []
+
+        for job in jobs:
+            status = str(job.get("status", "")).lower()
+            if status != "pending":
+                updated_jobs.append(job)
+                continue
+
+            expires_at = self._coerce_job_datetime(job.get("expires_at"))
+            reason = ""
+            elapsed: float | None = None
+            if expires_at is not None:
+                if reference < expires_at:
+                    updated_jobs.append(job)
+                    continue
+                reason = "expires_at"
+            else:
+                if timeout_seconds is None:
+                    updated_jobs.append(job)
+                    continue
+                start_time = self._pending_job_start(job)
+                if start_time is None:
+                    updated_jobs.append(job)
+                    continue
+                elapsed = (reference - start_time).total_seconds()
+                if elapsed <= timeout_seconds:
+                    updated_jobs.append(job)
+                    continue
+                reason = "elapsed"
+
+            job_id = self._parse_job_id(job.get("job_id"))
+            completed_at = expires_at or reference
+            timestamp = reference.isoformat()
+            timeout_payload = {
+                "status": "timeout",
+                "completed_at": completed_at.isoformat(),
+                "last_updated_at": timestamp,
+                "failure_reason": "timeout",
+            }
+
+            if job_id is None:
+                logger.warning(
+                    "score_engine.pending_timeout.missing_job_id hotkey=%s",
+                    job.get("miner_hotkey"),
+                )
+            else:
+                updates.append((job_id, timeout_payload))
+
+            updated_jobs.append({**job, **timeout_payload})
+            if reason == "expires_at":
+                logger.info(
+                    "score_engine.pending_timeout job_id=%s hotkey=%s reason=expires_at expires_at=%s",
+                    job_id or job.get("job_id"),
+                    job.get("miner_hotkey"),
+                    expires_at.isoformat(),
+                )
+            else:
+                logger.info(
+                    "score_engine.pending_timeout job_id=%s hotkey=%s reason=elapsed elapsed=%s timeout_seconds=%s",
+                    job_id or job.get("job_id"),
+                    job.get("miner_hotkey"),
+                    round(elapsed or 0.0, 3),
+                    timeout_seconds,
+                )
+
+        if updates:
+            await self._commit_pending_timeouts(job_relay, updates)
+
+        return updated_jobs
 
     async def fetch_completed_jobs(
         self,
@@ -326,7 +559,9 @@ class ScoreEngine:
         job_service = self._require_job_service()
         job_relay = getattr(job_service, "job_relay", None)
         if job_relay is None:
-            raise RuntimeError("Configured job service does not expose a job relay client")
+            raise RuntimeError(
+                "Configured job service does not expose a job relay client"
+            )
 
         hotkey_queue = self._normalize_hotkeys(hotkeys)
         if not hotkey_queue:
@@ -355,9 +590,13 @@ class ScoreEngine:
         async def _fetch_one(hotkey: str) -> tuple[list[Mapping[str, Any]], bool]:
             async with semaphore:
                 try:
-                    jobs = await job_relay.list_jobs_for_hotkey(hotkey, since=cutoff_time)
+                    jobs = await job_relay.list_jobs_for_hotkey(
+                        hotkey, since=cutoff_time
+                    )
                 except Exception as exc:  # pragma: no cover - network/logging safeguard
-                    logger.warning("score_engine.fetch_failed hotkey=%s", hotkey, exc_info=exc)
+                    logger.warning(
+                        "score_engine.fetch_failed hotkey=%s", hotkey, exc_info=exc
+                    )
                     return [], True
                 if not isinstance(jobs, list):
                     logger.warning(
@@ -366,6 +605,12 @@ class ScoreEngine:
                         type(jobs).__name__,
                     )
                     return [], True
+                if jobs and self._pending_timeout_seconds is not None:
+                    jobs = await self._apply_pending_timeouts(
+                        jobs,
+                        reference_time=reference,
+                        job_relay=job_relay,
+                    )
                 return jobs, False
 
         tasks = [_fetch_one(hotkey) for hotkey in hotkey_queue]
@@ -430,7 +675,9 @@ class ScoreEngine:
 
         return results
 
-    def update_scores(self, scores_by_hotkey: Mapping[str, ScoreRecord | float | int]) -> bool:
+    def update_scores(
+        self, scores_by_hotkey: Mapping[str, ScoreRecord | float | int]
+    ) -> bool:
         if not scores_by_hotkey:
             return True
 
@@ -447,7 +694,9 @@ class ScoreEngine:
             logger.error("score_engine.update_scores_failed", exc_info=exc)
             return False
 
-    async def run_once(self, *, trace_hotkeys: Iterable[str] | None = None) -> "ScoreRunSummary | None":
+    async def run_once(
+        self, *, trace_hotkeys: Iterable[str] | None = None
+    ) -> "ScoreRunSummary | None":
         trace_targets = self._normalize_hotkeys(trace_hotkeys or [])
         trace_target_set = set(trace_targets)
         trace_details: Dict[str, Dict[str, Any]] = {}
@@ -463,7 +712,9 @@ class ScoreEngine:
             try:
                 state_snapshot = self._miner_metagraph_service.dump_state()
             except Exception as exc:  # pragma: no cover - defensive snapshot guard
-                logger.debug("score_engine.invalid_hotkeys.snapshot_failed", exc_info=exc)
+                logger.debug(
+                    "score_engine.invalid_hotkeys.snapshot_failed", exc_info=exc
+                )
                 state_snapshot = {}
 
             invalid_hotkeys = {
@@ -479,7 +730,9 @@ class ScoreEngine:
             normalized_hotkeys = []
 
         if trace_targets:
-            normalized_hotkeys = self._normalize_hotkeys(normalized_hotkeys + trace_targets)
+            normalized_hotkeys = self._normalize_hotkeys(
+                normalized_hotkeys + trace_targets
+            )
 
         if not normalized_hotkeys and not invalid_hotkeys and not banned_hotkeys:
             logger.info("score_engine.run.skipped reason=%s", "no_hotkeys")
@@ -493,7 +746,9 @@ class ScoreEngine:
             max(0, len(normalized_hotkeys) - len(preview)),
         )
 
-        hotkeys_for_fetch = [hotkey for hotkey in normalized_hotkeys if hotkey not in banned_hotkeys]
+        hotkeys_for_fetch = [
+            hotkey for hotkey in normalized_hotkeys if hotkey not in banned_hotkeys
+        ]
         window_reference = datetime.now(timezone.utc)
         completed_jobs: Dict[str, list[Mapping[str, Any]]] = {}
         fetch_failures: set[str] = set()
@@ -518,7 +773,9 @@ class ScoreEngine:
         if trace_targets:
             for hotkey in trace_targets:
                 jobs = completed_jobs.get(hotkey, [])
-                statuses = sorted({str(job.get("status", "")).lower() or "unknown" for job in jobs})
+                statuses = sorted(
+                    {str(job.get("status", "")).lower() or "unknown" for job in jobs}
+                )
                 trace_details[hotkey] = {
                     "jobs_fetched": len(jobs),
                     "job_statuses": statuses,
@@ -533,7 +790,11 @@ class ScoreEngine:
                 )
 
         stored_scores = self._repository.all()
-        existing = {hotkey: stored_scores[hotkey] for hotkey in normalized_hotkeys if hotkey in stored_scores}
+        existing = {
+            hotkey: stored_scores[hotkey]
+            for hotkey in normalized_hotkeys
+            if hotkey in stored_scores
+        }
         zero_hotkeys: set[str] = set(invalid_hotkeys)
         if banned_hotkeys:
             relevant_banned = banned_hotkeys.intersection(
@@ -566,6 +827,25 @@ class ScoreEngine:
             reset_history.apply_decay(reference_now)
             score_records[hotkey] = reset_history.to_record()
 
+        failure_slashed: set[str] = set()
+        if self._failure_slash_threshold is not None:
+            threshold = self._failure_slash_threshold
+            for hotkey, record in score_records.items():
+                try:
+                    failure_count = int(getattr(record, "failure_count", 0) or 0)
+                except (TypeError, ValueError):
+                    failure_count = 0
+                if failure_count >= threshold:
+                    score_records[hotkey] = ScoreRecord(
+                        scores=0.0, failure_count=failure_count
+                    )
+                    failure_slashed.add(hotkey)
+
+        if failure_slashed:
+            await self._append_failure_bans(
+                failure_slashed, banned_hotkeys=banned_hotkeys
+            )
+
         if trace_targets:
             for hotkey in trace_targets:
                 record = score_records.get(hotkey)
@@ -576,7 +856,10 @@ class ScoreEngine:
                         "considered": hotkey in normalized_hotkeys,
                         "jobs_fetched": len(completed_jobs.get(hotkey, [])),
                         "job_statuses": sorted(
-                            {str(job.get("status", "")).lower() or "unknown" for job in completed_jobs.get(hotkey, [])}
+                            {
+                                str(job.get("status", "")).lower() or "unknown"
+                                for job in completed_jobs.get(hotkey, [])
+                            }
                         ),
                         "fetch_failed": hotkey in fetch_failures,
                     },
@@ -585,6 +868,8 @@ class ScoreEngine:
                     payload["score"] = record_score
                 else:
                     payload.setdefault("score", None)
+                if hotkey in failure_slashed:
+                    payload["failure_slashed"] = True
                 logger.info(
                     "score_engine.trace.scores hotkey=%s score=%s",
                     hotkey,
@@ -597,10 +882,14 @@ class ScoreEngine:
                 existing_record = stored_scores.get(hotkey)
                 if existing_record is not None:
                     try:
-                        failure_count = int(getattr(existing_record, "failure_count", 0))
+                        failure_count = int(
+                            getattr(existing_record, "failure_count", 0)
+                        )
                     except (TypeError, ValueError):
                         failure_count = 0
-                score_records[hotkey] = ScoreRecord(scores=0.0, failure_count=failure_count)
+                score_records[hotkey] = ScoreRecord(
+                    scores=0.0, failure_count=failure_count
+                )
                 if trace_targets and hotkey in trace_targets:
                     trace_details.setdefault(
                         hotkey,
@@ -612,7 +901,9 @@ class ScoreEngine:
                         },
                     ).update({"score": 0.0, "banned": hotkey in banned_hotkeys})
 
-        zeroed_hotkeys = sum(1 for record in score_records.values() if float(record.scores) <= 0.0)
+        zeroed_hotkeys = sum(
+            1 for record in score_records.values() if float(record.scores) <= 0.0
+        )
 
         persisted = self.update_scores(score_records)
 
@@ -674,7 +965,9 @@ class ScoreEngine:
 
     def _require_job_service(self) -> "JobService":
         if self._job_service is None:
-            raise RuntimeError("ScoreEngine job service dependency has not been configured")
+            raise RuntimeError(
+                "ScoreEngine job service dependency has not been configured"
+            )
         return self._job_service
 
     def _should_score_job(self, job: Mapping[str, Any]) -> bool:
@@ -747,6 +1040,8 @@ class ScoreEngine:
     def _is_completed_job(cls, job: Mapping[str, Any]) -> bool:
         status = str(job.get("status", "")).lower()
         return status in cls._COMPLETED_STATUSES
+
+
 class ScoreService:
     """Facade that exposes legacy ScoreService API while delegating to repository/engine."""
 
@@ -767,6 +1062,8 @@ class ScoreService:
         score_fn: Callable[[Mapping[str, Any]], float] = job_to_weighted_score,
         job_filter: Callable[[Mapping[str, Any]], bool] | None = job_type_has_weight,
         lookback_days: float | int | None = 7,
+        pending_timeout_seconds: float | int | None = _DEFAULT_PENDING_TIMEOUT_SECONDS,
+        failure_slash_threshold: float | int | None = _DEFAULT_FAILURE_SLASH_THRESHOLD,
     ) -> None:
         settings = ScoreSettings(
             ema_alpha=ema_alpha,
@@ -785,6 +1082,9 @@ class ScoreService:
             except (TypeError, ValueError):
                 candidate = 0.0
             self._lookback_days = candidate if candidate > 0.0 else None
+        self._failure_slash_threshold = _normalize_slash_threshold(
+            failure_slash_threshold
+        )
         self._engine = ScoreEngine(
             repository=self._repository,
             job_service=job_service,
@@ -798,11 +1098,17 @@ class ScoreService:
             score_fn=score_fn,
             job_filter=job_filter,
             lookback_days=self._lookback_days,
+            pending_timeout_seconds=pending_timeout_seconds,
+            failure_slash_threshold=self._failure_slash_threshold,
         )
 
     @property
     def db_path(self) -> str:
         return self._repository.db_path
+
+    @property
+    def failure_slash_threshold(self) -> int | None:
+        return self._failure_slash_threshold
 
     def last_update(self) -> Optional[datetime]:
         return self._repository.last_update()
@@ -813,7 +1119,9 @@ class ScoreService:
     def put_many(self, records: Mapping[str, Mapping[str, Any] | ScoreRecord]) -> None:
         self._repository.put_many(records)
 
-    def replace_all(self, records: Mapping[str, Mapping[str, Any] | ScoreRecord]) -> None:
+    def replace_all(
+        self, records: Mapping[str, Mapping[str, Any] | ScoreRecord]
+    ) -> None:
         self._repository.replace_all(records)
 
     def delete(self, hotkey: str) -> None:
@@ -847,7 +1155,9 @@ class ScoreService:
             network=network,
         )
 
-    def set_miner_metagraph_service(self, service: MinerMetagraphService | None) -> None:
+    def set_miner_metagraph_service(
+        self, service: MinerMetagraphService | None
+    ) -> None:
         self._engine.set_miner_metagraph_service(service)
 
     async def fetch_completed_jobs(
@@ -891,13 +1201,14 @@ class ScoreService:
     ) -> bool:
         return self.update_scores(scores_by_hotkey)
 
-    async def run_once(self, *, trace_hotkeys: Iterable[str] | None = None) -> "ScoreRunSummary | None":
+    async def run_once(
+        self, *, trace_hotkeys: Iterable[str] | None = None
+    ) -> "ScoreRunSummary | None":
         return await self._engine.run_once(trace_hotkeys=trace_hotkeys)
 
     @classmethod
     def _is_completed_job(cls, job: Mapping[str, Any]) -> bool:
         return ScoreEngine._is_completed_job(job)
-
 
 
 @dataclass
@@ -952,7 +1263,9 @@ class ScoreHistory:
             self.scores = self.ema_score
         self.last_ema_update_at = reference
 
-    def register_success(self, sample: float, event_time: datetime, job: Mapping[str, Any] | None = None) -> None:
+    def register_success(
+        self, sample: float, event_time: datetime, job: Mapping[str, Any] | None = None
+    ) -> None:
         value = self._clamp_score(sample)
         event = ensure_aware(event_time)
         alpha = max(0.0, min(self.settings.ema_alpha, 1.0))
@@ -971,14 +1284,20 @@ class ScoreHistory:
         self.last_success_at = event
         self.last_ema_update_at = event
         if job is not None:
-            job_id = job.get('job_id')
+            job_id = job.get("job_id")
             if job_id is not None:
-                self.extra_fields['last_job_id'] = job_id
-        self.extra_fields['failure_penalty_weight'] = self.settings.failure_penalty_weight
-        self.extra_fields['decay_half_life_seconds'] = self.settings.ema_half_life_seconds
-        self.extra_fields['ema_alpha'] = self.settings.ema_alpha
+                self.extra_fields["last_job_id"] = job_id
+        self.extra_fields["failure_penalty_weight"] = (
+            self.settings.failure_penalty_weight
+        )
+        self.extra_fields["decay_half_life_seconds"] = (
+            self.settings.ema_half_life_seconds
+        )
+        self.extra_fields["ema_alpha"] = self.settings.ema_alpha
 
-    def register_failure(self, event_time: datetime, job: Mapping[str, Any] | None = None) -> None:
+    def register_failure(
+        self, event_time: datetime, job: Mapping[str, Any] | None = None
+    ) -> None:
         event = ensure_aware(event_time)
         self.failure_count += 1
         penalty = max(0.0, min(self.settings.failure_penalty_weight, 1.0))
@@ -990,29 +1309,37 @@ class ScoreHistory:
             self.scores = penalized
         self.last_ema_update_at = event
         if job is not None:
-            job_id = job.get('job_id')
+            job_id = job.get("job_id")
             if job_id is not None:
-                self.extra_fields['last_job_id'] = job_id
+                self.extra_fields["last_job_id"] = job_id
 
     def to_payload(self) -> dict[str, Any]:
-        payload = {key: value for key, value in self.extra_fields.items() if key != 'is_slashed'}
+        payload = {
+            key: value
+            for key, value in self.extra_fields.items()
+            if key != "is_slashed"
+        }
         payload.update(
             {
-                'scores': float(self.scores),
-                'ema_score': float(self.ema_score),
-                'success_count': int(self.success_count),
-                'failure_count': int(self.failure_count),
-                'sample_count': int(self.sample_count),
-                'last_sample_at': self.last_success_at.isoformat() if self.last_success_at else None,
-                'ema_last_update_at': self.last_ema_update_at.isoformat() if self.last_ema_update_at else None,
-                'decay_half_life_seconds': float(self.settings.ema_half_life_seconds),
-                'failure_penalty_weight': float(self.settings.failure_penalty_weight),
-                'ema_alpha': float(self.settings.ema_alpha),
+                "scores": float(self.scores),
+                "ema_score": float(self.ema_score),
+                "success_count": int(self.success_count),
+                "failure_count": int(self.failure_count),
+                "sample_count": int(self.sample_count),
+                "last_sample_at": self.last_success_at.isoformat()
+                if self.last_success_at
+                else None,
+                "ema_last_update_at": self.last_ema_update_at.isoformat()
+                if self.last_ema_update_at
+                else None,
+                "decay_half_life_seconds": float(self.settings.ema_half_life_seconds),
+                "failure_penalty_weight": float(self.settings.failure_penalty_weight),
+                "ema_alpha": float(self.settings.ema_alpha),
             }
         )
         return {key: value for key, value in payload.items() if value is not None}
 
-    def to_record(self) -> 'ScoreRecord':
+    def to_record(self) -> "ScoreRecord":
         return ScoreRecord(**self.to_payload())
 
     @classmethod
@@ -1021,38 +1348,42 @@ class ScoreHistory:
         record: Mapping[str, Any] | ScoreRecord | None,
         *,
         settings: ScoreSettings,
-    ) -> 'ScoreHistory':
+    ) -> "ScoreHistory":
         if record is None:
             payload: dict[str, Any] = {}
         else:
             payload = dump_model(record)
 
-        scores = cls._coerce_float(payload.get('scores'), default=0.0)
-        ema_score = cls._coerce_float(payload.get('ema_score'), default=scores)
-        success_count = cls._coerce_int(payload.get('success_count'), default=0)
-        failure_count = cls._coerce_int(payload.get('failure_count'), default=0)
-        sample_count = cls._coerce_int(payload.get('sample_count'), default=success_count)
-        last_success_at = parse_datetime(payload.get('last_sample_at'))
+        scores = cls._coerce_float(payload.get("scores"), default=0.0)
+        ema_score = cls._coerce_float(payload.get("ema_score"), default=scores)
+        success_count = cls._coerce_int(payload.get("success_count"), default=0)
+        failure_count = cls._coerce_int(payload.get("failure_count"), default=0)
+        sample_count = cls._coerce_int(
+            payload.get("sample_count"), default=success_count
+        )
+        last_success_at = parse_datetime(payload.get("last_sample_at"))
         last_ema_update_at = parse_datetime(
-            payload.get('ema_last_update_at') or payload.get('last_score_update_at')
+            payload.get("ema_last_update_at") or payload.get("last_score_update_at")
         )
 
         managed_keys = {
-            'scores',
-            'is_slashed',
-            'ema_score',
-            'success_count',
-            'failure_count',
-            'sample_count',
-            'last_sample_at',
-            'ema_last_update_at',
-            'decay_half_life_seconds',
-            'failure_penalty_weight',
-            'ema_alpha',
-            'last_score_update_at',
-            'legacy_score',
+            "scores",
+            "is_slashed",
+            "ema_score",
+            "success_count",
+            "failure_count",
+            "sample_count",
+            "last_sample_at",
+            "ema_last_update_at",
+            "decay_half_life_seconds",
+            "failure_penalty_weight",
+            "ema_alpha",
+            "last_score_update_at",
+            "legacy_score",
         }
-        extras = {key: value for key, value in payload.items() if key not in managed_keys}
+        extras = {
+            key: value for key, value in payload.items() if key not in managed_keys
+        }
 
         normalized_settings = settings.normalized()
 
@@ -1068,13 +1399,17 @@ class ScoreHistory:
             extra_fields=extras,
         )
 
-        stored_half_life = cls._coerce_float(payload.get('decay_half_life_seconds'), default=None)
+        stored_half_life = cls._coerce_float(
+            payload.get("decay_half_life_seconds"), default=None
+        )
         if stored_half_life is not None and stored_half_life > 0.0:
             history.settings.ema_half_life_seconds = stored_half_life
-        stored_penalty = cls._coerce_float(payload.get('failure_penalty_weight'), default=None)
+        stored_penalty = cls._coerce_float(
+            payload.get("failure_penalty_weight"), default=None
+        )
         if stored_penalty is not None and stored_penalty >= 0.0:
             history.settings.failure_penalty_weight = stored_penalty
-        stored_alpha = cls._coerce_float(payload.get('ema_alpha'), default=None)
+        stored_alpha = cls._coerce_float(payload.get("ema_alpha"), default=None)
         if stored_alpha is not None:
             history.settings.ema_alpha = max(0.0, min(stored_alpha, 1.0))
         history.settings = history.settings.normalized()
@@ -1092,7 +1427,7 @@ class ScoreHistory:
         settings: ScoreSettings,
         reference_time: datetime,
         logger: logging.Logger | None = None,
-    ) -> 'ScoreHistory':
+    ) -> "ScoreHistory":
         history = cls.from_record(existing_record, settings=settings)
         history.scores = 0.0
         history.ema_score = 0.0
@@ -1101,7 +1436,7 @@ class ScoreHistory:
         history.sample_count = 0
         history.last_success_at = None
         history.last_ema_update_at = None
-        history.extra_fields.pop('last_job_id', None)
+        history.extra_fields.pop("last_job_id", None)
         events: list[tuple[datetime, Mapping[str, Any]]] = []
         for job in jobs:
             if not ScoreService._is_completed_job(job):
@@ -1112,19 +1447,19 @@ class ScoreHistory:
         events.sort(key=lambda item: item[0])
         for event_time, job in events:
             history.apply_decay(event_time)
-            status = str(job.get('status', '')).lower()
-            if status == 'success':
+            status = str(job.get("status", "")).lower()
+            if status == "success":
                 callback_latency = callback_latency_ms(job)
                 if (
-                    is_h100_kontext_job_type(job.get('job_type'))
+                    is_h100_kontext_job_type(job.get("job_type"))
                     and callback_latency is not None
                     and callback_latency > H100_KONTEXT_MAX_LATENCY_MS
                 ):
                     if logger is not None:
                         logger.info(
-                            'score_history.latency_timeout hotkey=%s job_id=%s latency_ms=%s max_ms=%s',
-                            job.get('miner_hotkey'),
-                            job.get('job_id'),
+                            "score_history.latency_timeout hotkey=%s job_id=%s latency_ms=%s max_ms=%s",
+                            job.get("miner_hotkey"),
+                            job.get("job_id"),
                             callback_latency,
                             H100_KONTEXT_MAX_LATENCY_MS,
                         )
@@ -1134,9 +1469,9 @@ class ScoreHistory:
                 if latency_ms is None:
                     if logger is not None:
                         logger.info(
-                            'score_history.missing_latency hotkey=%s job_id=%s',
-                            job.get('miner_hotkey'),
-                            job.get('job_id'),
+                            "score_history.missing_latency hotkey=%s job_id=%s",
+                            job.get("miner_hotkey"),
+                            job.get("job_id"),
                         )
                     history.register_failure(event_time, job=job)
                     continue
@@ -1145,9 +1480,9 @@ class ScoreHistory:
                 except Exception as exc:
                     if logger is not None:
                         logger.warning(
-                            'score_history.sample_failed hotkey=%s job_id=%s',
-                            job.get('miner_hotkey'),
-                            job.get('job_id'),
+                            "score_history.sample_failed hotkey=%s job_id=%s",
+                            job.get("miner_hotkey"),
+                            job.get("job_id"),
                             exc_info=exc,
                         )
                     continue
@@ -1176,7 +1511,7 @@ class ScoreHistory:
 
     @staticmethod
     def _coerce_float(value: Any, default: float | None = 0.0) -> float:
-        if value in {None, '', 'None'}:
+        if value in {None, "", "None"}:
             return default
         try:
             return float(value)
@@ -1185,7 +1520,7 @@ class ScoreHistory:
 
     @staticmethod
     def _coerce_int(value: Any, default: int = 0) -> int:
-        if value in {None, '', 'None'}:
+        if value in {None, "", "None"}:
             return default
         try:
             return int(value)
@@ -1195,18 +1530,17 @@ class ScoreHistory:
     @staticmethod
     def _extract_event_time(job: Mapping[str, Any]) -> datetime | None:
         candidates = (
-            job.get('completed_at'),
-            job.get('last_updated_at'),
-            job.get('response_timestamp'),
-            job.get('prepared_at'),
-            job.get('creation_timestamp'),
+            job.get("completed_at"),
+            job.get("last_updated_at"),
+            job.get("response_timestamp"),
+            job.get("prepared_at"),
+            job.get("creation_timestamp"),
         )
         for candidate in candidates:
             parsed = parse_datetime(candidate)
             if parsed is not None:
                 return parsed
         return None
-
 
 
 _DEFAULT_LOOKBACK_WINDOW = timedelta(days=7)
@@ -1259,11 +1593,13 @@ async def build_scores_from_state(
     ema_alpha: float = 0.3,
     ema_half_life_seconds: float | None = None,
     failure_penalty_weight: float = 0.7,
+    failure_slash_threshold: float | int | None = _DEFAULT_FAILURE_SLASH_THRESHOLD,
 ) -> ScoresResponse:
     if job_relay_client is None:
         raise ValueError("job_relay_client must be provided for score construction")
 
     banned_hotkeys = banned_hotkeys or set()
+    failure_slash_threshold = _normalize_slash_threshold(failure_slash_threshold)
     window = lookback_window or _DEFAULT_LOOKBACK_WINDOW
     reference_now = datetime.now(timezone.utc)
     cutoff = reference_now - window
@@ -1276,27 +1612,33 @@ async def build_scores_from_state(
         failure_penalty_weight=failure_penalty_weight,
     ).normalized()
 
-    async def _score_hotkey(hotkey: str, miner: Miner) -> tuple[str, ScorePayload, dict[str, Any]]:
+    async def _score_hotkey(
+        hotkey: str, miner: Miner
+    ) -> tuple[str, ScorePayload, dict[str, Any]]:
         is_banned = hotkey in banned_hotkeys
         async with semaphore:
             failed_audits = int(getattr(miner, "failed_audits", 0) or 0)
             is_invalid = not bool(getattr(miner, "valid", True))
             slashed = is_banned or failed_audits > 0 or is_invalid
-            status_value = "SLASHED" if slashed else "COMPLETED"
             if is_banned:
+                status_value = "SLASHED" if slashed else "COMPLETED"
                 payload = ScorePayload(
                     status=status_value,
                     score=ScoreValue(total_score=0.0),
                 )
-                return hotkey, payload, {
-                    "jobs_considered": 0,
-                    "jobs_scored": 0,
-                    "failures": 0,
-                    "fetch_failed": False,
-                    "miner_valid": bool(getattr(miner, "valid", False)),
-                    "failed_audits": failed_audits,
-                    "banned": True,
-                }
+                return (
+                    hotkey,
+                    payload,
+                    {
+                        "jobs_considered": 0,
+                        "jobs_scored": 0,
+                        "failures": 0,
+                        "fetch_failed": False,
+                        "miner_valid": bool(getattr(miner, "valid", False)),
+                        "failed_audits": failed_audits,
+                        "banned": True,
+                    },
+                )
             try:
                 jobs = await job_relay_client.list_jobs_for_hotkey(hotkey, since=cutoff)
             except Exception as exc:  # pragma: no cover - defensive network logging
@@ -1309,17 +1651,23 @@ async def build_scores_from_state(
                     status=status_value,
                     score=ScoreValue(total_score=0.0),
                 )
-                return hotkey, payload, {
-                    "jobs_considered": 0,
-                    "jobs_scored": 0,
-                    "failures": 0,
-                    "fetch_failed": True,
-                    "miner_valid": bool(getattr(miner, "valid", False)),
-                    "failed_audits": failed_audits,
-                }
+                return (
+                    hotkey,
+                    payload,
+                    {
+                        "jobs_considered": 0,
+                        "jobs_scored": 0,
+                        "failures": 0,
+                        "fetch_failed": True,
+                        "miner_valid": bool(getattr(miner, "valid", False)),
+                        "failed_audits": failed_audits,
+                    },
+                )
 
             filtered_jobs = [
-                job for job in jobs if _is_relevant_inference_job(job, cutoff, job_filter)
+                job
+                for job in jobs
+                if _is_relevant_inference_job(job, cutoff, job_filter)
             ]
 
             history = ScoreHistory.from_jobs(
@@ -1331,20 +1679,31 @@ async def build_scores_from_state(
                 logger=logger,
             )
 
+            if (
+                failure_slash_threshold is not None
+                and history.failure_count >= failure_slash_threshold
+            ):
+                slashed = True
+
+            status_value = "SLASHED" if slashed else "COMPLETED"
             score_total = 0.0 if slashed else float(history.scores)
             payload = ScorePayload(
                 status=status_value,
                 score=ScoreValue(total_score=score_total),
             )
-            return hotkey, payload, {
-                "jobs_considered": len(filtered_jobs),
-                "jobs_scored": history.success_count,
-                "failures": history.failure_count,
-                "fetch_failed": False,
-                "miner_valid": bool(getattr(miner, "valid", False)),
-                "ema_score": history.ema_score,
-                "failed_audits": failed_audits,
-            }
+            return (
+                hotkey,
+                payload,
+                {
+                    "jobs_considered": len(filtered_jobs),
+                    "jobs_scored": history.success_count,
+                    "failures": history.failure_count,
+                    "fetch_failed": False,
+                    "miner_valid": bool(getattr(miner, "valid", False)),
+                    "ema_score": history.ema_score,
+                    "failed_audits": failed_audits,
+                },
+            )
 
     if not state:
         stats = {
@@ -1362,10 +1721,7 @@ async def build_scores_from_state(
         }
         return ScoresResponse(scores={}, stats=stats)
 
-    tasks = [
-        _score_hotkey(hotkey, miner)
-        for hotkey, miner in state.items()
-    ]
+    tasks = [_score_hotkey(hotkey, miner) for hotkey, miner in state.items()]
     results = await asyncio.gather(*tasks, return_exceptions=False)
 
     scores: Dict[str, ScorePayload] = {}

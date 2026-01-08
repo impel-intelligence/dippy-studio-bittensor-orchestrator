@@ -125,7 +125,9 @@ class MinerRepository:
         return {hotkey: miner for hotkey, miner in self.iter_miners(valid_only=True)}
 
     def fetch_miners(self, *, valid_only: bool = True) -> Dict[str, Miner]:
-        return {hotkey: miner for hotkey, miner in self.iter_miners(valid_only=valid_only)}
+        return {
+            hotkey: miner for hotkey, miner in self.iter_miners(valid_only=valid_only)
+        }
 
     def fetch_candidate_records(
         self,
@@ -251,7 +253,9 @@ class MinerRepository:
             return None
         return None
 
-    def _failure_count_from_scores(self, payload: Optional[Mapping[str, object]]) -> int:
+    def _failure_count_from_scores(
+        self, payload: Optional[Mapping[str, object]]
+    ) -> int:
         if not payload:
             return 0
         candidate = payload.get("failure_count")

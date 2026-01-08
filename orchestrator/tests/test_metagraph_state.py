@@ -11,7 +11,11 @@ import pytest
 
 from orchestrator.services.miner_metagraph_service import MinerMetagraphService
 from orchestrator.domain.miner import Miner
-from orchestrator.routes import create_internal_router, create_public_router, MinerUpsertRequest
+from orchestrator.routes import (
+    create_internal_router,
+    create_public_router,
+    MinerUpsertRequest,
+)
 from orchestrator.clients.database import PostgresClient
 from orchestrator.services.score_service import ScoreRecord, ScoreService
 from sn_uuid import uuid7
@@ -48,9 +52,11 @@ def _create_temp_database(base_dsn: str) -> tuple[str, str, str]:
 
     with psycopg.connect(admin_conninfo, autocommit=True) as conn:
         with conn.cursor() as cur:
-            create_stmt = sql.SQL("CREATE DATABASE {}" ).format(sql.Identifier(temp_db_name))
+            create_stmt = sql.SQL("CREATE DATABASE {}").format(
+                sql.Identifier(temp_db_name)
+            )
             if owner:
-                create_stmt += sql.SQL(" OWNER {}" ).format(sql.Identifier(owner))
+                create_stmt += sql.SQL(" OWNER {}").format(sql.Identifier(owner))
             cur.execute(create_stmt)
 
     temp_params = params.copy()
@@ -68,7 +74,11 @@ def _drop_database(admin_conninfo: str, database_name: str) -> None:
                 "WHERE datname = %s AND pid <> pg_backend_pid()",
                 (database_name,),
             )
-            cur.execute(sql.SQL("DROP DATABASE IF EXISTS {}" ).format(sql.Identifier(database_name)))
+            cur.execute(
+                sql.SQL("DROP DATABASE IF EXISTS {}").format(
+                    sql.Identifier(database_name)
+                )
+            )
 
 
 @pytest.fixture()
@@ -83,7 +93,9 @@ def database_service() -> Iterator[PostgresClient]:
         _drop_database(admin_conninfo, temp_db_name)
 
 
-def test_live_metagraph_client_tracks_sync_metadata(database_service: PostgresClient) -> None:
+def test_live_metagraph_client_tracks_sync_metadata(
+    database_service: PostgresClient,
+) -> None:
     client = MinerMetagraphService(database_service)
 
     assert client.last_update() is None
@@ -96,7 +108,9 @@ def test_live_metagraph_client_tracks_sync_metadata(database_service: PostgresCl
     assert client.last_block() == 99
 
 
-def test_metagraph_state_endpoint_includes_metadata(database_service: PostgresClient) -> None:
+def test_metagraph_state_endpoint_includes_metadata(
+    database_service: PostgresClient,
+) -> None:
     client = MinerMetagraphService(database_service)
     score_service = ScoreService(database_service)
     state = _build_state()
@@ -215,13 +229,17 @@ def test_internal_miner_routes_support_crud(database_service: PostgresClient) ->
         for route in router.routes
         if route.path == "/_internal/miners/{hotkey}" and "DELETE" in route.methods
     )
-    delete_response = asyncio.run(delete_route.endpoint(hotkey="hk-route", client=client))
+    delete_response = asyncio.run(
+        delete_route.endpoint(hotkey="hk-route", client=client)
+    )
     assert delete_response.hotkey == "hk-route"
     assert delete_response.status == "deleted"
     assert client.get_miner("hk-route") is None
 
 
-def test_internal_capacity_route_reports_capacities(database_service: PostgresClient) -> None:
+def test_internal_capacity_route_reports_capacities(
+    database_service: PostgresClient,
+) -> None:
     client = MinerMetagraphService(database_service)
     router = create_internal_router()
     fetched_at = datetime(2025, 3, 5, 6, 7, tzinfo=timezone.utc)
@@ -285,7 +303,9 @@ def test_fetch_candidate_filters_by_task_type(database_service: PostgresClient) 
     assert client.fetch_candidate(task_type="non-existent-task") is None
 
 
-def test_fetch_candidate_requires_true_capacity(database_service: PostgresClient) -> None:
+def test_fetch_candidate_requires_true_capacity(
+    database_service: PostgresClient,
+) -> None:
     client = MinerMetagraphService(database_service)
     client.update_state(
         {
@@ -332,7 +352,9 @@ def test_validate_state_normalizes_capacity_and_marks_invalid_on_parse_error(
     def _fake_urlopen(*args, **kwargs):  # noqa: ANN001 - matches stdlib signature
         return _StubResponse(status=200)
 
-    monkeypatch.setattr("orchestrator.services.miner_metagraph_service.urlopen", _fake_urlopen)
+    monkeypatch.setattr(
+        "orchestrator.services.miner_metagraph_service.urlopen", _fake_urlopen
+    )
 
     state = {
         "hk-valid": Miner(
@@ -353,7 +375,10 @@ def test_validate_state_normalizes_capacity_and_marks_invalid_on_parse_error(
 
     validated = client.validate_state(state)
 
-    assert validated["hk-valid"].capacity == {"base-h100_pcie": True, "img-h100_pcie": True}
+    assert validated["hk-valid"].capacity == {
+        "base-h100_pcie": True,
+        "img-h100_pcie": True,
+    }
     assert validated["hk-valid"].valid is True
     assert validated["hk-invalid"].valid is False
     assert validated["hk-invalid"].capacity == {}
@@ -428,7 +453,9 @@ def test_fetch_miners_exposes_failure_count(database_service: PostgresClient) ->
     assert miners[hotkey].failure_count == 7
 
 
-def test_public_miner_status_includes_failure_count(database_service: PostgresClient) -> None:
+def test_public_miner_status_includes_failure_count(
+    database_service: PostgresClient,
+) -> None:
     client = MinerMetagraphService(database_service)
     score_service = ScoreService(database_service)
     hotkey = "hk-public"
@@ -492,7 +519,9 @@ def test_validate_state_preserves_manually_invalidated_miners(
     def _fake_urlopen(*args, **kwargs):  # noqa: ANN001 - signature mirrors stdlib
         return _StubResponse(status=200)
 
-    monkeypatch.setattr("orchestrator.services.miner_metagraph_service.urlopen", _fake_urlopen)
+    monkeypatch.setattr(
+        "orchestrator.services.miner_metagraph_service.urlopen", _fake_urlopen
+    )
 
     new_state = {
         hotkey: Miner(
@@ -508,7 +537,9 @@ def test_validate_state_preserves_manually_invalidated_miners(
     assert validated[hotkey].valid is False
 
 
-def test_validate_state_preserves_manually_validated_miners(database_service: PostgresClient) -> None:
+def test_validate_state_preserves_manually_validated_miners(
+    database_service: PostgresClient,
+) -> None:
     client = MinerMetagraphService(database_service)
     hotkey = "hk-audit-valid"
     client.upsert_miner(
@@ -535,7 +566,9 @@ def test_validate_state_preserves_manually_validated_miners(database_service: Po
     assert validated[hotkey].valid is True
 
 
-def test_validate_state_bans_failed_audits(database_service: PostgresClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_validate_state_bans_failed_audits(
+    database_service: PostgresClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = MinerMetagraphService(database_service)
     hotkey = "hk-banned"
     client.upsert_miner(
@@ -573,7 +606,9 @@ class _StubJobRelay:
     def __init__(self, payloads: dict[str, list[dict[str, Any]]] | None = None) -> None:
         self._payloads = payloads or {}
 
-    async def list_jobs_for_hotkey(self, hotkey: str, since: Any = None) -> list[dict[str, Any]]:
+    async def list_jobs_for_hotkey(
+        self, hotkey: str, since: Any = None
+    ) -> list[dict[str, Any]]:
         return list(self._payloads.get(hotkey, []))
 
 
@@ -732,3 +767,70 @@ def test_score_etl_zeroes_banned_hotkeys(database_service: PostgresClient) -> No
     assert banned_record.scores == pytest.approx(0.0)
     assert valid_record is not None
     assert valid_record.scores > 0.0
+
+
+def test_score_etl_bans_after_failure_threshold(
+    database_service: PostgresClient,
+) -> None:
+    metagraph = MinerMetagraphService(database_service)
+    hotkey = "hk-failure-ban"
+
+    metagraph.update_state(
+        {
+            hotkey: Miner(
+                uid=300,
+                network_address="https://fail.example",
+                valid=True,
+                alpha_stake=9,
+                capacity={},
+                hotkey=hotkey,
+            ),
+        }
+    )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    job_payloads = {
+        hotkey: [
+            {
+                "job_id": "job-fail-1",
+                "status": "failed",
+                "job_type": "img-h100_pcie",
+                "is_audit_job": False,
+                "completed_at": now_iso,
+                "metrics": {"latency_ms": 900},
+            },
+            {
+                "job_id": "job-fail-2",
+                "status": "failed",
+                "job_type": "img-h100_pcie",
+                "is_audit_job": False,
+                "completed_at": now_iso,
+                "metrics": {"latency_ms": 900},
+            },
+            {
+                "job_id": "job-fail-3",
+                "status": "timeout",
+                "job_type": "img-h100_pcie",
+                "is_audit_job": False,
+                "completed_at": now_iso,
+                "metrics": {"latency_ms": 900},
+            },
+        ]
+    }
+
+    ss58_client = _StubSS58Client()
+    score_service = ScoreService(
+        database_service,
+        job_service=_StubJobService(job_payloads),
+        miner_metagraph_service=metagraph,
+        netuid=1,
+        network="testnet",
+        ss58_client=ss58_client,
+        failure_slash_threshold=3,
+    )
+
+    summary = asyncio.run(score_service.run_once())
+    assert summary is not None
+
+    assert hotkey in ss58_client.addresses
+    assert ss58_client.append_calls
